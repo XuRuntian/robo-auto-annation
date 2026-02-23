@@ -1,7 +1,5 @@
 """
-# Robo-ETL 交互式数据对齐工作台
-
-基于 Streamlit 实现的可视化数据校验工具，支持人工微调 AI 预标注的动作切分边界
+# Robo-ETL 交互式数据对齐工作台 (全局轨迹适配版)
 """
 import streamlit as st
 import plotly.graph_objects as go
@@ -10,184 +8,258 @@ from src.core.factory import ReaderFactory
 import numpy as np
 import json
 import os
+import pandas as pd
 
-def generate_mock_subtasks(total_frames):
-    """生成模拟的AI预标注数据（包含尖峰特征的典型任务分布）"""
-    return [
-        {
-            "subtask_id": "grasp_001",
-            "instruction": "夹爪闭合抓取物体",
-            "start_frame": int(total_frames * 0.2),
-            "end_frame": int(total_frames * 0.35)
-        },
-        {
-            "subtask_id": "lift_002",
-            "instruction": "垂直提升物体",
-            "start_frame": int(total_frames * 0.35),
-            "end_frame": int(total_frames * 0.55)
-        },
-        {
-            "subtask_id": "place_003",
-            "instruction": "放置物体到目标位置",
-            "start_frame": int(total_frames * 0.55),
-            "end_frame": int(total_frames * 0.8)
-        }
-    ]
-
-def generate_mock_waveform(total_frames):
-    """生成带尖峰的随机机械臂运动轨迹数据（复合速度L2 Norm）"""
-    base = np.sin(np.linspace(0, 4*np.pi, total_frames)) * 0.5
-    spikes = np.zeros(total_frames)
-    spikes[np.random.choice(total_frames, size=5, replace=False)] = 2.0
-    return base + spikes + np.random.normal(0, 0.1, total_frames)
+def extract_kinematic_waveform(reader, total_frames):
+    """提取运动学波形 (例如：夹爪动作、关节速度的 L2 Norm)"""
+    waveform = []
+    progress_bar = st.sidebar.progress(0, text="正在解析运动学特征...")
+    
+    for i in range(total_frames):
+        try:
+            frame_data = reader.get_frame(i)
+            val = 0.0
+            if frame_data and frame_data.state is not None:
+                for key in ['action', 'qpos', 'qvel', 'velocity', 'effort']:
+                    if key in frame_data.state and frame_data.state[key] is not None:
+                        # 计算 L2 范数
+                        val = np.linalg.norm(frame_data.state[key])
+                        break
+            waveform.append(val)
+        except Exception as e:
+            waveform.append(0.0)
+            
+        if i % 10 == 0 or i == total_frames - 1:
+            progress_bar.progress((i + 1) / total_frames, text=f"提取特征: {i+1}/{total_frames}")
+            
+    progress_bar.empty()
+    return np.array(waveform)
 
 def main():
-    """主函数：构建Streamlit界面并处理用户交互"""
     st.set_page_config(page_title="Robo-ETL 数据对齐工作台", layout="wide")
     
+    # ==========================================
     # 1. 数据源与顶层控制 (侧边栏)
+    # ==========================================
     with st.sidebar:
-        st.header("数据源配置")
-        data_path = st.text_input("HDF5文件路径", value="/data/robot_demos/demo.hdf5")
+        st.header("📂 导入全局数据")
         
-        if st.button("加载数据"):
+        data_path = st.text_input("数据集路径 (如 .hdf5 / .mcap / parquet 根目录)", 
+                                  value="/home/user/test_data/")
+        
+        uploaded_json = st.file_uploader("上传 AI 全局预标注 JSON (包含多条轨迹字典)", type=['json','jsonl'])
+        
+        if st.button("加载并初始化工作台", type="primary"):
+            if not os.path.exists(data_path):
+                st.error(f"找不到数据集文件：{data_path}")
+                return
+            if uploaded_json is None:
+                st.warning("请上传包含 AI 预标注信息的 JSON 文件。")
+                return
+                
             try:
-                # 初始化Reader
+                # 解析上传的全局 JSON 字典
+                all_annotations = json.load(uploaded_json)
+                
+                # 初始化 Reader
                 reader = ReaderFactory.get_reader(data_path)
-                total_frames = reader.get_total_frames()
+                if not reader.load(data_path):
+                    st.error("数据集加载失败，请检查文件格式。")
+                    return
                 
-                # 读取或生成数据
-                try:
-                    # 尝试使用Reader的原生方法
-                    subtasks = reader.get_subtasks()
-                    waveform = reader.get_kinematic_data()
-                except AttributeError:
-                    # 使用Mock数据作为后备
-                    subtasks = generate_mock_subtasks(total_frames)
-                    waveform = generate_mock_waveform(total_frames)
+                # 尝试获取总轨迹数 (兼容无 set_episode 的旧适配器)
+                total_episodes = getattr(reader, "get_total_episodes", lambda: 1)()
+                if hasattr(reader, "set_episode"):
+                    reader.set_episode(0)
+                    
+                total_frames = reader.get_length()
+                waveform = extract_kinematic_waveform(reader, total_frames)
                 
-                # 存储在session_state中供后续使用
+                # 保存所有必需的状态到全局
                 st.session_state.update({
                     'reader': reader,
+                    'total_episodes': total_episodes,
+                    'all_annotations': all_annotations,
+                    'current_episode_idx': 0,
                     'total_frames': total_frames,
-                    'subtasks': subtasks,
+                    'waveform': waveform,
+                    'current_frame': 0,
+                    'data_loaded': True
+                })
+                st.rerun() # 加载完直接刷新页面
+            except Exception as e:
+                st.error(f"初始化失败：{str(e)}")
+
+        # --- 轨迹切换控制区 ---
+        if st.session_state.get('data_loaded', False):
+            st.divider()
+            st.header("🔄 轨迹切换")
+            
+            # 使用下拉框选择当前标注的 Episode
+            ep_options = list(range(st.session_state.total_episodes))
+            selected_ep = st.selectbox(
+                "当前作业轨迹 (Episode)", 
+                options=ep_options, 
+                index=st.session_state.current_episode_idx,
+                format_func=lambda x: f"Episode {x}"
+            )
+            
+            # 侦测到用户切换了轨迹
+            if selected_ep != st.session_state.current_episode_idx:
+                reader = st.session_state.reader
+                if hasattr(reader, "set_episode"):
+                    reader.set_episode(selected_ep)
+                
+                total_frames = reader.get_length()
+                waveform = extract_kinematic_waveform(reader, total_frames)
+                
+                # 更新状态并重置播放头
+                st.session_state.update({
+                    'current_episode_idx': selected_ep,
+                    'total_frames': total_frames,
                     'waveform': waveform,
                     'current_frame': 0
                 })
-                
-                st.success("数据加载成功！")
-            except Exception as e:
-                st.error(f"数据加载失败：{str(e)}")
+                st.rerun()
 
+    if not st.session_state.get('data_loaded', False):
+        st.info("👈 请在左侧边栏配置数据集路径并上传标注 JSON 文件。")
+        return
+
+    # 从全局字典中获取当前 episode 的 subtasks 列表
+    ep_key = str(st.session_state.current_episode_idx)
+    current_subtasks = st.session_state.all_annotations.get(ep_key, [])
+
+    # ==========================================
     # 2. 视频/图像预览区 (左侧布局)
+    # ==========================================
     col1, col2 = st.columns([1, 2])
     
     with col1:
-        st.subheader("图像预览")
-        if 'reader' in st.session_state:
-            current_frame = st.slider(
-                "选择帧号", 
-                0, 
-                st.session_state.total_frames-1,
-                key='frame_slider',
-                on_change=lambda: st.session_state.update({'current_frame': st.session_state.frame_slider})
-            )
-            
-            try:
-                frame = st.session_state.reader.get_frame(current_frame)
-                st.image(frame, caption=f"帧 {current_frame}", use_column_width=True)
-            except Exception as e:
-                st.error(f"图像读取失败：{str(e)}")
-        else:
-            st.info("请先加载数据集")
-
-    # 3. 多模态时间轴与物理波形图 (右侧布局)
-    with col2:
-        st.subheader("时间轴与运动学分析")
+        st.subheader(f"📹 图像预览 - Episode {st.session_state.current_episode_idx}")
         
-        if 'subtasks' in st.session_state:
-            # 创建联动图表
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05)
-            
-            # 上层：时间轴（甘特图）
-            for i, task in enumerate(st.session_state.subtasks):
-                fig.add_shape(
-                    type="rect",
-                    x0=task['start_frame'], x1=task['end_frame'],
-                    y0=0, y1=1,
-                    fillcolor=f"rgba({i*80}, 150, 200, 0.6)",
-                    line_width=0,
-                    row=1, col=1,
-                    hoverinfo="text",
-                    text=f"{task['instruction']}<br>帧: {task['start_frame']}-{task['end_frame']}"
-                )
-            
-            # 下层：波形图
-            fig.add_trace(
-                go.Scatter(
-                    x=np.arange(st.session_state.total_frames),
-                    y=st.session_state.waveform,
-                    mode='lines',
-                    name='运动学特征',
-                    line=dict(color='rgb(55, 126, 184)')
-                ),
-                row=2, col=1
-            )
-            
-            # 图表布局设置
-            fig.update_layout(
-                height=600,
-                showlegend=False,
-                xaxis2_title="帧号",
-                yaxis=dict(title="任务", showticklabels=False, showgrid=False),
-                yaxis2=dict(title="复合速度 (L2 Norm)")
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("请先加载数据集")
+        current_frame = st.slider(
+            "拖拽时间轴查看具体帧", 
+            0, 
+            max(0, st.session_state.total_frames - 1),
+            value=st.session_state.get('current_frame', 0),
+            key='frame_slider'
+        )
+        st.session_state.current_frame = current_frame
+        
+        try:
+            frame_data = st.session_state.reader.get_frame(current_frame)
+            if frame_data and frame_data.images:
+                cam_name = list(frame_data.images.keys())[0]
+                img_array = frame_data.images[cam_name]
+                st.image(img_array, caption=f"帧号: {current_frame} | 视角: {cam_name}", use_container_width=True)
+                
+                if len(frame_data.images) > 1:
+                    tabs = st.tabs(list(frame_data.images.keys()))
+                    for idx, (c_name, c_img) in enumerate(frame_data.images.items()):
+                        with tabs[idx]:
+                            st.image(c_img, use_container_width=True)
+            else:
+                st.warning("该帧未包含图像数据")
+        except Exception as e:
+            st.error(f"图像读取失败：{str(e)}")
 
-    # 4. 交互式数据对齐编辑器 (底部布局)
-    st.subheader("预标注编辑器")
-    
-    if 'subtasks' in st.session_state:
-        # 使用st.data_editor进行表格编辑
-        edited_subtasks = st.data_editor(
-            st.session_state.subtasks,
-            column_config={
-                "subtask_id": st.column_config.TextColumn("任务ID", disabled=True),
-                "instruction": st.column_config.TextColumn("自然语言指令"),
-                "start_frame": st.column_config.NumberColumn("起始帧", min_value=0),
-                "end_frame": st.column_config.NumberColumn("结束帧", min_value=0)
-            },
-            num_rows="dynamic",
-            key='subtask_editor'
+    # ==========================================
+    # 3. 多模态时间轴与物理波形图 (右侧布局)
+    # ==========================================
+    with col2:
+        st.subheader("📊 多模态时间轴 (AI预测 vs 物理状态)")
+        
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.3, 0.7])
+        
+        # Row 1: 时间轴色块
+        colors = ['#EF553B', '#00CC96', '#AB63FA', '#FFA15A', '#19D3F3', '#FF6692']
+        for i, task in enumerate(current_subtasks):
+            fig.add_shape(
+                type="rect",
+                x0=task.get('start_frame', 0), x1=task.get('end_frame', 0),
+                y0=0, y1=1,
+                fillcolor=colors[i % len(colors)],
+                opacity=0.6,
+                line_width=0,
+                row=1, col=1
+            )
+            fig.add_trace(go.Scatter(
+                x=[(task.get('start_frame', 0) + task.get('end_frame', 0)) / 2],
+                y=[0.5],
+                mode="text",
+                text=[f"Task {task.get('subtask_id', i+1)}"],
+                hoverinfo="text",
+                hovertext=f"<b>指令:</b> {task.get('instruction', 'N/A')}<br><b>区间:</b> {task.get('start_frame')}-{task.get('end_frame')}",
+                showlegend=False
+            ), row=1, col=1)
+        
+        # Row 2: 物理波形图
+        fig.add_trace(
+            go.Scatter(
+                x=np.arange(st.session_state.total_frames),
+                y=st.session_state.waveform,
+                mode='lines',
+                name='Kinematic Feature',
+                line=dict(color='#377eb8', width=1.5)
+            ),
+            row=2, col=1
         )
         
-        # 当表格数据变化时更新session_state
-        if edited_subtasks != st.session_state.subtasks:
-            st.session_state.subtasks = edited_subtasks
-            st.experimental_rerun()  # 强制刷新以更新图表
-    
-    # 5. 导出功能
-    if 'subtasks' in st.session_state:
-        col1, col2, col3 = st.columns([1, 1, 2])
-        with col1:
-            if st.button("保存修改"):
-                try:
-                    # 这里可以添加持久化保存逻辑
-                    st.success("修改已保存到内存")
-                except Exception as e:
-                    st.error(f"保存失败：{str(e)}")
+        fig.add_vline(x=st.session_state.current_frame, line_width=2, line_dash="dash", line_color="red")
         
-        with col2:
-            json_data = json.dumps(st.session_state.subtasks, indent=2)
-            st.download_button(
-                label="导出JSON",
-                data=json_data,
-                file_name="aligned_subtasks.json",
-                mime="application/json"
-            )
+        fig.update_layout(
+            height=450, margin=dict(l=20, r=20, t=30, b=20),
+            hovermode="x unified", xaxis2_title="Frame Number",
+            yaxis=dict(showticklabels=False, showgrid=False),
+            yaxis2=dict(title="Kinematic Feature")
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ==========================================
+    # 4. 交互式数据对齐编辑器 (底部布局)
+    # ==========================================
+    st.divider()
+    st.subheader(f"✍️ Episode {st.session_state.current_episode_idx} 边界微调")
+    
+    # 构建 DataFrame，处理当前 episode 为空列表的情况
+    df_subtasks = pd.DataFrame(current_subtasks)
+    if df_subtasks.empty:
+        df_subtasks = pd.DataFrame(columns=["subtask_id", "instruction", "start_frame", "end_frame"])
+        
+    edited_df = st.data_editor(
+        df_subtasks,
+        column_config={
+            "subtask_id": st.column_config.NumberColumn("任务 ID", disabled=True),
+            "instruction": st.column_config.TextColumn("自然语言指令 (Instruction)"),
+            "start_frame": st.column_config.NumberColumn("起始帧", min_value=0, max_value=st.session_state.total_frames, step=1),
+            "end_frame": st.column_config.NumberColumn("结束帧", min_value=0, max_value=st.session_state.total_frames, step=1)
+        },
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic", # 允许增删行
+        key='data_editor'
+    )
+    
+    # 实时检测数据变更并回写到全局字典
+    if not edited_df.equals(df_subtasks):
+        st.session_state.all_annotations[ep_key] = edited_df.to_dict('records')
+        st.rerun()
+
+    # ==========================================
+    # 5. 全局导出功能
+    # ==========================================
+    col3, col4 = st.columns([8, 2])
+    with col4:
+        # 注意：这里导出的是全集 all_annotations，而非单条轨迹
+        json_str = json.dumps(st.session_state.all_annotations, indent=4, ensure_ascii=False)
+        st.download_button(
+            label="💾 保存并导出全局 JSON",
+            data=json_str,
+            file_name="all_aligned_annotations.json",
+            mime="application/json",
+            use_container_width=True
+        )
 
 if __name__ == "__main__":
     main()

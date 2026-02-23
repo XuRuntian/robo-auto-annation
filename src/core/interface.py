@@ -49,6 +49,23 @@ class BaseDatasetReader(ABC):
         pass
     
     @abstractmethod
+    def get_total_episodes(self) -> int:
+        """
+        返回数据集包含的总轨迹数。
+        默认返回 1（适用于单文件数据集，如单个 ROS bag 或单条 HDF5）。
+        支持多轨迹的数据集（如 LeRobot）需重写此方法。
+        """
+        return 1
+    
+    @abstractmethod
+    def set_episode(self, episode_idx: int):
+        """
+        切换当前读取的轨迹。
+        对于单轨迹数据集，此方法可不做任何事。
+        """
+        pass
+    
+    @abstractmethod
     def close(self):
         """释放文件句柄"""
         pass

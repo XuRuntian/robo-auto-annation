@@ -15,13 +15,18 @@ class LeRobotAdapter(BaseDatasetReader):
         self.image_keys = []
         self.full_feature_keys = {}
         self.image_path_tpl = ""
-        self.video_path_tpl = ""  # [Fix 1] 新增属性
+        self.video_path_tpl = ""  
         self.cap_cache = {} 
         self.version = ""
+        
+        # [新增] 轨迹管理属性
+        self.episode_files = [] 
+        self.current_episode_idx = 0
 
     def load(self, file_path: str) -> bool:
         self.root_path = Path(file_path)
         
+        # 获取所有 parquet 文件并按文件名排序
         parquet_files = sorted(list(self.root_path.rglob("data/**/*.parquet")))
         if not parquet_files:
             parquet_files = sorted(list(self.root_path.glob("*.parquet")))
@@ -29,10 +34,11 @@ class LeRobotAdapter(BaseDatasetReader):
         if not parquet_files:
             print(f"❌ [LeRobot] 找不到 parquet 数据")
             return False
+            
+        # [修改] 存储文件路径列表，不立刻 concat 读取
+        self.episode_files = parquet_files
 
         try:
-            self.df = pd.concat([pd.read_parquet(f) for f in parquet_files], ignore_index=True)
-            
             meta_path = self.root_path / "meta" / "info.json"
             if not meta_path.exists():
                 print("❌ [LeRobot] 缺少 meta/info.json")
@@ -43,7 +49,7 @@ class LeRobotAdapter(BaseDatasetReader):
                 self.version = info.get("codebase_version", "v2.1")
                 self.fps = info.get("fps", 30.0)
                 self.image_path_tpl = info.get("image_path", "")
-                self.video_path_tpl = info.get("video_path", "") # [Fix 2] 读取视频模板
+                self.video_path_tpl = info.get("video_path", "")
                 
                 features = info.get("features", {})
                 self.image_keys = []
@@ -54,14 +60,40 @@ class LeRobotAdapter(BaseDatasetReader):
                         short_name = key.split(".")[-1]
                         self.image_keys.append(short_name)
                         self.full_feature_keys[short_name] = key
-                
-            print(f"✅ [LeRobot] 加载成功: {len(self.df)} 帧, 相机: {self.image_keys}")
+            
+            # [新增] 默认加载第一条轨迹用于初始化
+            self.set_episode(0)
+            print(f"✅ [LeRobot] 加载成功: 共扫描到 {len(self.episode_files)} 条轨迹, 相机: {self.image_keys}")
             return True
 
         except Exception as e:
             print(f"❌ [LeRobot] 加载异常: {e}")
             return False
 
+    # ==========================================
+    # [新增] 对外统一的管理接口
+    # ==========================================
+    def set_episode(self, episode_idx: int):
+        """按需加载单条轨迹，避免内存爆炸"""
+        if episode_idx < 0 or episode_idx >= len(self.episode_files):
+            return
+            
+        self.current_episode_idx = episode_idx
+        
+        # 释放旧轨迹的视频缓存
+        self.close() 
+        
+        # 仅读取当前选中的单条 parquet
+        parquet_path = self.episode_files[episode_idx]
+        self.df = pd.read_parquet(parquet_path)
+        print(f"🔄 [LeRobot] 已切换至 Episode {episode_idx} ({parquet_path.name}), 当前轨迹帧数: {len(self.df)}")
+
+    def get_total_episodes(self) -> int:
+        return len(self.episode_files)
+
+    # ==========================================
+    # 继承的接口实现
+    # ==========================================
     def get_length(self) -> int:
         return len(self.df) if self.df is not None else 0
 
