@@ -6,7 +6,7 @@ from src.adapters.hdf5_adapter import HDF5Adapter
 from src.adapters.ros_adapter import RosAdapter
 from src.adapters.unitree_adapter import UnitreeAdapter
 from src.adapters.folder_adapter import FolderAdapter
-from src.adapters.lerobot_adapter import LeRobotAdapter # <--- 确保导入
+from src.adapters.lerobot_adapter import LeRobotAdapter
 
 class ReaderFactory:
     @staticmethod
@@ -18,12 +18,18 @@ class ReaderFactory:
             # Unitree 特征
             if (path / "data.json").exists():
                 return "Unitree"
-            # [Fix] LeRobot 特征增强
-            # 1. 检查标准元数据文件
+                
+            # [Fix] LeRobot / Dorobot 特征增强
+            # 1. 检查标准元数据文件 (原生 LeRobot，单条轨迹直接包含 meta 文件夹)
             if (path / "meta" / "info.json").exists():
                 return "LeRobot"
-            # 2. 检查 data 目录下是否有 parquet (支持递归查找 chunk-xxx)
-            # 注意：仅当 path/data 存在时才检查，避免遍历整个硬盘
+                
+            # 2. [新增] 检查子目录中是否包含 meta/info.json (Dorobot 格式，多轨迹被包裹在父文件夹中)
+            # 只要任意一个子文件夹里有 meta/info.json，就认为是 LeRobot/Dorobot 格式集
+            if list(path.glob("*/meta/info.json")):
+                return "LeRobot"
+                
+            # 3. 检查 data 目录下是否有 parquet (支持递归查找 chunk-xxx)
             if (path / "data").is_dir():
                 try:
                     # 使用 rglob 查找任意深度的 parquet 文件，找到一个即止
@@ -31,6 +37,7 @@ class ReaderFactory:
                     return "LeRobot"
                 except StopIteration:
                     pass
+                    
             # Folder 特征 (包含图片)
             if list(path.glob("*.jpg")) or list(path.glob("*.png")) or \
                list(path.glob("colors/*.jpg")):
@@ -54,4 +61,4 @@ class ReaderFactory:
         if dtype == "HDF5": return HDF5Adapter()
         if dtype == "ROS": return RosAdapter()
         
-        raise ValueError(f"无法识别的数据格式: {path.name}")
+        raise ValueError(f"无法识别的数据格式: {path.name} (绝对路径: {path.absolute()})")
