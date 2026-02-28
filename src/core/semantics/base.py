@@ -4,6 +4,7 @@ import numpy as np
 from src.core.types import CutPoint, ValidationResult
 
 class BaseSemanticValidator(ABC):
+    @abstractmethod
     def validate_point(
         self,
         window_data: Dict[str, List[np.ndarray]],
