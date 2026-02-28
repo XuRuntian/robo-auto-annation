@@ -51,6 +51,7 @@ class RoboETLPipeline:
             
             # B. 获取嫌疑切点
             cut_points = self.physics_detector.propose_cut_points(qpos_data)
+            print(f"Episode {episode_idx}: Detected {len(cut_points)} cut points.,{cut_points=}")
             if not cut_points:
                 return [{
                     "subtask_id": 1,
@@ -64,13 +65,12 @@ class RoboETLPipeline:
             for cut_point in cut_points:
                 # 生成局部窗口
                 window_data = self.window_generator.generate_windows(self.reader, cut_point)
-                
                 # 验证切点
                 result = self.semantic_validator.validate_point(
                     window_data=window_data,
                     physics_energy=cut_point.energy_score
                 )
-                
+                print(f"{result=}")
                 # 满足置信度阈值
                 if result.is_true_switch and result.confidence_score > confidence_threshold:
                     valid_segments.append({
@@ -90,39 +90,34 @@ class RoboETLPipeline:
             
             # E. 转换为动作片段
             total_frames = ep_length
-            segments = []
             valid_segments.sort(key=lambda x: x["frame_idx"])  # 按帧索引排序
             
-            # 添加起点
-            segments.append({
-                "frame_idx": 0,
-                "instruction": valid_segments[0]["instruction"],
-                "confidence": valid_segments[0]["confidence"]
-            })
-            
-            # 添加有效切点
-            segments.extend(valid_segments)
-            
-            # 添加终点
-            segments.append({
-                "frame_idx": total_frames - 1,
-                "instruction": valid_segments[-1]["instruction"],
-                "confidence": valid_segments[-1]["confidence"]
-            })
-            
-            # 生成最终片段
             final_segments = []
-            for i in range(len(segments) - 1):
-                start_idx = segments[i]["frame_idx"]
-                end_idx = segments[i+1]["frame_idx"] - 1
+            
+            for i, seg in enumerate(valid_segments):
+                # 1. 填补第一段（从 0 帧到第一个切点之前）
+                if i == 0 and seg["frame_idx"] > 0:
+                    final_segments.append({
+                        "subtask_id": 1,
+                        "instruction": "Initial approach / Task setup", # 默认启动动作
+                        "start_frame": 0,
+                        "end_frame": seg["frame_idx"] - 1,
+                        "confidence": 1.0
+                    })
                 
-                final_segments.append({
-                    "subtask_id": i + 1,
-                    "instruction": segments[i]["instruction"],
-                    "start_frame": int(start_idx),
-                    "end_frame": int(end_idx),
-                    "confidence": segments[i]["confidence"]
-                })
+                # 2. 当前切点到下一个切点（或视频结尾）
+                start_frame = seg["frame_idx"]
+                end_frame = valid_segments[i+1]["frame_idx"] - 1 if i + 1 < len(valid_segments) else total_frames - 1
+                
+                # 防止由于相邻帧过近导致的逻辑反转
+                if start_frame <= end_frame:
+                    final_segments.append({
+                        "subtask_id": len(final_segments) + 1,
+                        "instruction": seg["instruction"],
+                        "start_frame": int(start_frame),
+                        "end_frame": int(end_frame),
+                        "confidence": float(seg["confidence"])
+                    })
                 
             return final_segments
             

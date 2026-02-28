@@ -41,7 +41,7 @@ class LocalWindowGenerator:
         for key, (start, end) in ranges.items():
             num_frames = end - start + 1
             indices = np.linspace(0, num_frames - 1, 3, dtype=int)
-            frames = [reader.read_frame(start + i) for i in indices]
+            frames = [reader.get_frame(start + i) for i in indices]
             result[key] = frames
         
         return result
