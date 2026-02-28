@@ -49,16 +49,13 @@ class RoboETLPipeline:
         self.reader.set_episode(episode_idx)
         ep_length = self.reader.get_length()
         qpos_data = self.extract_qpos(ep_length)
-        
         # B. 提取全局 SOP（如果为空）
         if not self.global_sop:
             self.extract_global_sop()
-            print(f"Extracted global SOP: {self.global_sop}")
         
         # C. 获取嫌疑切点
         cut_points = self.physics_detector.propose_cut_points(qpos_data)
-        print(f"Episode {episode_idx}: Detected {len(cut_points)} cut points.,{cut_points=}")
-        
+
         # D. 动态对齐逻辑
         valid_cut_points = []
         current_sop_index = 0
@@ -76,7 +73,7 @@ class RoboETLPipeline:
             result = self.semantic_validator.validate_point(
                 window_data=window_data,
                 physics_energy=cut_point.energy_score,
-                expected_instruction=self.global_sop[current_sop_index]
+                # expected_instruction=self.global_sop[current_sop_index]
             )
             print(f"{result=}")
             
@@ -127,58 +124,101 @@ class RoboETLPipeline:
         
         return final_segments
 
-    def extract_global_sop(self, sample_size: int = 3, task_desc: str = '') -> List[str]:
+    def extract_global_sop(self, sample_size: int = 3, task_desc: str = '', uniform_sampling: bool = True) -> List[str]:
         """
         提取全局SOP
-        
-        参数:
-            sample_size: 需要抽取的episode数量
-            task_desc: 任务描述
-            
-        返回:
-            List[str]: 宏观步骤列表
         """
+        import json
+        import re
+
         total_eps = self.reader.get_total_episodes()
         sample_indices = np.linspace(0, total_eps - 1, sample_size, dtype=int)
         
-        # 收集采样配置
+        # 1. 收集采样配置
         sample_configs = []
         for ep_idx in sample_indices:
             self.reader.set_episode(ep_idx)
-            qpos = self.extract_qpos(self.reader.get_length())
-            cut_points = self.physics_detector.propose_cut_points(qpos)
-            if cut_points:
-                indices = [cp.frame_idx for cp in cut_points]
-                sample_configs.append((ep_idx, indices))
+            ep_length = self.reader.get_length()
 
-        # 生成超级九宫格图
+            if uniform_sampling:
+                # 均匀采样直接生成帧索引列表
+                frame_indices = np.linspace(0, ep_length - 1, 9, dtype=int).tolist()
+            else:
+                # 物理探测并统一转为帧索引
+                qpos = self.extract_qpos(ep_length)
+                raw_points = self.physics_detector.propose_cut_points(qpos)
+                frame_indices = [cp.frame_idx for cp in raw_points] if raw_points else []
+
+            if frame_indices:
+                sample_configs.append((ep_idx, frame_indices))
+        
+        if not sample_configs:
+            logger.error("未能获取任何有效的采样点")
+            return []
+
+        # 2. 生成图片
         mega_path = "mega_sop_grid.jpg"
+        print(f"Generating mega grid for SOP extraction with {len(sample_configs)} samples...")
         GridImageGenerator.generate_mega_grid(self.reader, sample_configs, mega_path)
         
-        # 构建Prompt
-        sop_prompt = (
-            f"{task_desc}\n"
-            f"图中包含 {sample_size} 组相同任务的执行过程。每一组都是 3x3 九宫格。\n"
-            "请观察这些不同实例的共性，总结该任务的宏观操作步骤（如 ['1. 靠近', '2. 抓取']），以JSON数组形式返回。"
-        )
-        
+        # 3. 专家级 Prompt
+        sop_prompt = f"""You are an expert robotic data annotator. You are given a grid image containing {len(sample_configs)} separate execution instances of the same task. Each instance is shown as a 3x3 sequential keyframe grid.
+
+        [Global Context]
+        Task Description: "{task_desc}"
+
+        [Goal]
+        Identify the CONSISTENT macro-level steps (SOP) across all instances.
+
+        [Action Rules]
+        1. Merge micro-actions: Combine "approach" and "grasp" into one step; combine "move" and "release" into one step.
+        2. Language: MUST be in English.
+
+        [Output Format]
+        Return ONLY a strict JSON object. No conversational text.
+        Structure: 
+        {{
+          "sop_steps": ["Step 1...", "Step 2..."]
+        }}
+        """
+
         try:
-            # 调用Qwen API
+            # 4. 调用 API
             response = self.semantic_validator._call_qwen_api(mega_path, sop_prompt)
+            print(f"Qwen API raw response: {response}")
             
-            # 解析响应
-            if isinstance(response, dict) and 'sop_steps' in response:
-                self.global_sop = response['sop_steps']
-            elif isinstance(response, list):
-                self.global_sop = response
+            # --- 关键改进：鲁棒性解析逻辑 ---
+            extracted_data = None
+            
+            if isinstance(response, str):
+                # 使用正则提取第一个 { ... } 块
+                match = re.search(r'\{.*\}', response, re.DOTALL)
+                if match:
+                    try:
+                        extracted_data = json.loads(match.group())
+                    except json.JSONDecodeError:
+                        logger.error("JSON 解码失败，请检查 API 返回内容内容格式")
+                else:
+                    # 如果没找到 {}，尝试寻找 []
+                    match_list = re.search(r'\[.*\]', response, re.DOTALL)
+                    if match_list:
+                        extracted_data = json.loads(match_list.group())
+            elif isinstance(response, (dict, list)):
+                extracted_data = response
+
+            # --- 结果分发 ---
+            if isinstance(extracted_data, dict) and 'sop_steps' in extracted_data:
+                self.global_sop = extracted_data['sop_steps']
+            elif isinstance(extracted_data, list):
+                self.global_sop = extracted_data
             else:
                 self.global_sop = []
-                logger.warning("Qwen API返回格式不符合预期，已设置空SOP列表")
+                logger.warning(f"Qwen API 返回格式不符合预期，原始响应内容为: {response}")
                 
             return self.global_sop
             
         except Exception as e:
-            logger.error(f"SOP提取失败: {str(e)}")
+            logger.error(f"SOP 提取失败: {str(e)}")
             self.global_sop = []
             return []
     

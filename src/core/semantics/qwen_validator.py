@@ -144,39 +144,62 @@ class QwenSemanticValidator(BaseSemanticValidator):
 
         return prompt
     
-    def _call_qwen_api(self, images: List[np.ndarray], prompt: str) -> str:
-        """使用 OpenAI SDK 兼容模式调用 Qwen-VL"""
-        # 构建消息体：先放文本
+    def _call_qwen_api(self, input_data: Union[List[np.ndarray], str], prompt: str) -> str:
+        """
+        支持双重模式：
+        1. 列表模式: List[np.ndarray] (用于逐点验证)
+        2. 路径模式: str (用于全局 SOP 提取，传入 mega_path)
+        """
         content_list = [{"type": "text", "text": prompt}]
         
-        # 依次放入图像序列
-        for idx, image in enumerate(images):
-            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 80]
-            success, buffer = cv2.imencode('.jpg', image, encode_param)
-            if success:
-                image_base64 = base64.b64encode(buffer).decode('utf-8')
-                content_list.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{image_base64}"
-                    }
-                })
+        # --- 核心修复逻辑 ---
+        image_list = []
+        
+        if isinstance(input_data, str):
+            # 路径模式：从磁盘读取图片
+            if not os.path.exists(input_data):
+                raise FileNotFoundError(f"找不到指定的图片文件: {input_data}")
+            
+            # 使用 numpy 读取以支持更多编码格式和路径兼容性
+            with open(input_data, "rb") as f:
+                img_bytes = f.read()
+                image_base64 = base64.b64encode(img_bytes).decode('utf-8')
+                image_list.append(image_base64)
+                
+        elif isinstance(input_data, list):
+            # 数组列表模式：对每个 numpy 数组进行编码
+            for idx, img_arr in enumerate(input_data):
+                if not isinstance(img_arr, np.ndarray):
+                    logger.warning(f"跳过无效图像对象: {type(img_arr)}")
+                    continue
+                    
+                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
+                success, buffer = cv2.imencode('.jpg', img_arr, encode_param)
+                if success:
+                    image_base64 = base64.b64encode(buffer).decode('utf-8')
+                    image_list.append(image_base64)
+        else:
+            raise ValueError(f"不支持的输入格式: {type(input_data)}")
 
+        # 将编码后的图片放入 content_list
+        for b64_str in image_list:
+            content_list.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{b64_str}"
+                }
+            })
+
+        # --- 发送请求 (逻辑不变) ---
         try:
-            # 采用你旧代码里极其稳定的调用方式
             response = self.client.chat.completions.create(
                 model=self.model_name,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": content_list
-                    }
-                ],
-                temperature=0.1,  # 👈 核心关键：禁止模型发散思维
+                messages=[{"role": "user", "content": content_list}],
+                temperature=0.1,
             )
             return response.choices[0].message.content
         except Exception as e:
-            logger.error(f"OpenAI Client 请求抛出异常: {e}")
+            logger.error(f"Qwen API 请求失败: {e}")
             raise e
     
     def _parse_api_response(self, text: str) -> Dict:

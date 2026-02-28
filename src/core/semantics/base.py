@@ -9,7 +9,7 @@ class BaseSemanticValidator(ABC):
         self,
         window_data: Dict[str, List[np.ndarray]],
         physics_energy: float,
-        previous_instruction: Optional[str] = None
+        expected_instruction: Optional[str] = None
     ) -> ValidationResult:
         """验证切点是否为真实任务切换点"""
         pass
