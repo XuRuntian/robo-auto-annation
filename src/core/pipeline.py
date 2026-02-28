@@ -1,31 +1,27 @@
 import os
 import numpy as np
 from typing import List, Dict, Optional, Any
-from src.core.factory import ReaderFactory
 from src.core.physics.base import BasePhysicsDetector
 from src.core.windows.generator import LocalWindowGenerator
 from src.core.semantics.base import BaseSemanticValidator
 from src.core.types import CutPoint, ValidationResult
 from src.core.image_utils import GridImageGenerator
+import logging
+
+logger = logging.getLogger(__name__)
 
 class RoboETLPipeline:
     def __init__(
         self,
-        dataset_path: str,
-        robot_config: Dict[str, Any],
+        reader: Any,
         physics_detector: BasePhysicsDetector,
         window_generator: LocalWindowGenerator,
         semantic_validator: BaseSemanticValidator
     ):
-        self.dataset_path = dataset_path
-        self.robot_config = robot_config
+        self.reader = reader
         self.physics_detector = physics_detector
         self.window_generator = window_generator
         self.semantic_validator = semantic_validator
-        
-        self.reader = ReaderFactory.get_reader(dataset_path)
-        if not self.reader.load(dataset_path):
-            raise ValueError("数据集加载失败")
 
     def extract_qpos(self, ep_length: int) -> np.ndarray:
         qpos_list = []
@@ -35,6 +31,109 @@ class RoboETLPipeline:
             val = state.get("qpos") if state.get("qpos") is not None else state.get("action")
             qpos_list.append(val if val is not None else np.zeros(6))
         return np.array(qpos_list)
+
+    def process_episode(self, episode_idx: int, confidence_threshold: float = 0.3) -> List[Dict]:
+        """
+        处理单个 episode，生成动作片段
+        
+        参数:
+            episode_idx: episode 的索引
+            confidence_threshold: 置信度阈值
+            
+        返回:
+            List[Dict]: 动作片段列表
+        """
+        try:
+            # A. 读取轨迹
+            self.reader.set_episode(episode_idx)
+            ep_length = self.reader.get_length()
+            qpos_data = self.extract_qpos(ep_length)
+            
+            # B. 获取嫌疑切点
+            cut_points = self.physics_detector.propose_cut_points(qpos_data)
+            if not cut_points:
+                return [{
+                    "subtask_id": 1,
+                    "instruction": "⚠️ [未检测到切点] 请复核",
+                    "start_frame": 0,
+                    "end_frame": ep_length - 1
+                }]
+            
+            # C. 验证切点
+            valid_segments = []
+            for cut_point in cut_points:
+                # 生成局部窗口
+                window_data = self.window_generator.generate_windows(self.reader, cut_point)
+                
+                # 验证切点
+                result = self.semantic_validator.validate_point(
+                    window_data=window_data,
+                    physics_energy=cut_point.energy_score
+                )
+                
+                # 满足置信度阈值
+                if result.is_true_switch and result.confidence_score > confidence_threshold:
+                    valid_segments.append({
+                        "frame_idx": cut_point.frame_idx,
+                        "instruction": result.instruction,
+                        "confidence": result.confidence_score
+                    })
+            
+            # D. 无有效切点
+            if not valid_segments:
+                return [{
+                    "subtask_id": 1,
+                    "instruction": "⚠️ [未检测到有效切换点] 请复核",
+                    "start_frame": 0,
+                    "end_frame": ep_length - 1
+                }]
+            
+            # E. 转换为动作片段
+            total_frames = ep_length
+            segments = []
+            valid_segments.sort(key=lambda x: x["frame_idx"])  # 按帧索引排序
+            
+            # 添加起点
+            segments.append({
+                "frame_idx": 0,
+                "instruction": valid_segments[0]["instruction"],
+                "confidence": valid_segments[0]["confidence"]
+            })
+            
+            # 添加有效切点
+            segments.extend(valid_segments)
+            
+            # 添加终点
+            segments.append({
+                "frame_idx": total_frames - 1,
+                "instruction": valid_segments[-1]["instruction"],
+                "confidence": valid_segments[-1]["confidence"]
+            })
+            
+            # 生成最终片段
+            final_segments = []
+            for i in range(len(segments) - 1):
+                start_idx = segments[i]["frame_idx"]
+                end_idx = segments[i+1]["frame_idx"] - 1
+                
+                final_segments.append({
+                    "subtask_id": i + 1,
+                    "instruction": segments[i]["instruction"],
+                    "start_frame": int(start_idx),
+                    "end_frame": int(end_idx),
+                    "confidence": segments[i]["confidence"]
+                })
+                
+            return final_segments
+            
+        except Exception as e:
+            logger.error(f"Episode processing failed: {str(e)}", exc_info=True)
+            return [{
+                "subtask_id": 1,
+                "instruction": f"❌ [处理失败] {str(e)}",
+                "start_frame": 0,
+                "end_frame": ep_length - 1
+            }]
 
     def generate_global_template(
         self, 

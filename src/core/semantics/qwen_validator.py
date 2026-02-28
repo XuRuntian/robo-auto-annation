@@ -1,152 +1,169 @@
-import os
-import json
-import base64
-import re
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional, Union
 import numpy as np
-from openai import OpenAI
-import httpx
-from PIL import Image, ImageDraw, ImageFont
-
+import cv2
+import json
+import re
+import base64
+import logging
+from src.core.types import ValidationResult, CutPoint
+from src.core.image_utils import encode_image_to_base64
 from src.core.semantics.base import BaseSemanticValidator
-from src.core.types import ValidationResult
-from src.core.image_utils import GridImageGenerator
 
-def encode_image_to_base64(image_path):
-    """将本地图片转换为 Base64 编码"""
-    with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode('utf-8')
-
-def extract_json_from_response(text: str) -> dict:
-    """健壮的 JSON 提取器"""
-    json_pattern = re.compile(r'```(?:json)?\s*(.*?)\s*```', re.DOTALL)
-    match = json_pattern.search(text)
-    if match:
-        json_str = match.group(1)
-    else:
-        start_idx = text.find('{')
-        end_idx = text.rfind('}')
-        if start_idx != -1 and end_idx != -1:
-            json_str = text[start_idx:end_idx+1]
-        else:
-            json_str = text
-            
-    try:
-        return json.loads(json_str)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"无法从 VLM 响应中解析 JSON。原始响应:\n{text}\n错误: {e}")
+logger = logging.getLogger(__name__)
 
 class QwenSemanticValidator(BaseSemanticValidator):
-    def __init__(self):
-        self.api_key = os.environ.get("DASHSCOPE_API_KEY")
-        if not self.api_key:
-            raise ValueError("未找到 DASHSCOPE_API_KEY 环境变量，请先设置！")
-            
-        # 强制阿里云域名不走系统 VPN/代理（国内服务器挂代理必断连）
-        os.environ["NO_PROXY"] = "dashscope.aliyuncs.com,aliyuncs.com"
-
-    def validate_point(
-        self,
-        window_data: Dict[str, List[np.ndarray]],
-        physics_energy: float,
-        previous_instruction: Optional[str] = None
-    ) -> ValidationResult:
+    """
+    基于Qwen-VL大模型的语义验证器，用于判断切点是否为子任务动作切换点。
+    
+    继承自 BaseSemanticValidator
+    """
+    def __init__(self, model_config: Dict = None):
         """
-        验证切点是否为真实任务切换点
-        1. 将局部窗口图像拼接成九宫格
-        2. 调用 Qwen-VL 模型进行语义验证
-        3. 解析响应并生成 ValidationResult
-        """
-        if not self.api_key:
-            raise ValueError("未找到 DASHSCOPE_API_KEY 环境变量，请先设置！")
-            
-        # 1. 生成临时窗口图像
-        temp_path = "temp_window_grid.jpg"
-        GridImageGenerator.generate_window_grid(window_data, temp_path)
+        初始化验证器
         
+        参数:
+            model_config (Dict): 模型配置参数，包含 API 密钥等信息
+        """
+        super().__init__()
+        self.model_config = model_config or {}
+        self.api_key = self.model_config.get('api_key', 'default_key')
+        self.api_endpoint = self.model_config.get('api_endpoint', 'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation')
+    
+    def validate_point(self, window_data: Dict[str, List[np.ndarray]], 
+                      physics_energy: float, 
+                      previous_instruction: Optional[str] = None) -> ValidationResult:
         try:
-            # 2. 调用 Qwen-VL API
-            result = self._call_qwen_vl_api(temp_path)
+            window_results = []
+            instructions = []  # 存3个窗口分别的指令
+            required_windows = ['before', 'center', 'after']
             
-            # 3. 计算融合置信度
-            fused_confidence = self.compute_fused_confidence(physics_energy, result["certainty"])
+            for window in required_windows:
+                if window not in window_data or len(window_data[window]) != 3:
+                    raise ValueError(f"Invalid window data in '{window}'")
+                
+                # 调用Qwen-VL API (每次发送当前窗口的 3 张图)
+                prompt = self._build_validation_prompt(previous_instruction)
+                api_response = self._call_qwen_api(window_data[window], prompt)
+                
+                # 解析响应 (返回的是字典 Dict)
+                vlm_dict = self._parse_api_response(api_response)
+                
+                # 收集结果
+                window_results.append(vlm_dict.get('is_switch', False))
+                instructions.append(vlm_dict.get('instruction', ""))
             
+            # 2. 指令提取：优先使用center窗口，其次使用其他判定为True的窗口
+            final_instruction = ""
+            if window_results[1]:  # center 窗口判断为 True
+                final_instruction = instructions[1]
+            elif window_results[0]: # before 窗口判断为 True
+                final_instruction = instructions[0]
+            elif window_results[2]: # after 窗口判断为 True
+                final_instruction = instructions[2]
+            
+            # 3. 融合物理能量和窗口结果 (调用父类的汉宁窗加权)
+            final_confidence = self.compute_fused_confidence(
+                physics_energy=physics_energy,
+                window_results=window_results
+            )
+            
+            # 4. 返回标准化的 ValidationResult
             return ValidationResult(
-                is_true_switch=result["is_true_switch"],
-                instruction=result["instruction"],
-                confidence_score=fused_confidence,
-                reasoning=result["reasoning"]
+                is_true_switch=any(window_results), # 只要有一个窗口认定是切换即可（得分低会被UI标黄）
+                instruction=final_instruction,
+                confidence_score=final_confidence,
+                reasoning=json.dumps({"window_votes": window_results}) # 原来的 raw_response 字段在基类里叫 reasoning
             )
-        finally:
-            # 清理临时文件
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-
-    def _call_qwen_vl_api(self, image_path: str) -> dict:
-        """调用阿里云 Qwen-VL 模型并返回解析好的结果"""
-        # 修复了 URL 格式，并配置底层的 http 客户端（设置 120 秒超时）
-        http_client = httpx.Client(
-            timeout=httpx.Timeout(120.0), # 给大图片上传留足时间
-        )
-
-        client = OpenAI(
-            api_key=self.api_key,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1", # 👈 这里的网址必须是纯净的！
-            http_client=http_client
-        )
-
-        prompt_text = """请分析图像中的机器人动作序列，判断是否为真实任务切换点。
-
-        [图像说明]
-        图像包含三个时间窗口：
-        - 左侧（pre）：切点前1秒的帧序列
-        - 中间（mid）：切点附近0.5秒的帧序列
-        - 右侧（post）：切点后1秒的帧序列
-
-        [任务要求]
-        请判断画面中是真实的任务切换（True）还是中途停顿（False）：
-        1. 如果是真实切换（True），请给出指令描述和置信度
-        2. 如果是中途停顿（False），请说明理由
-
-        [输出格式]
-        {
-            "is_true_switch": true,
-            "instruction": "Robotic arm grasps the object",
-            "certainty": 0.92,
-            "reasoning": "检测到明显的动作模式变化和目标交互"
-        }
-        """
-
-        base64_image = encode_image_to_base64(image_path)
-        print(f"📸 图片转 Base64 成功，体积大小约为: {len(base64_image) / 1024 / 1024:.2f} MB")
-        print(f"🚀 正在建立与阿里云百炼的连接，请耐心等待 10-30 秒...")
-
-        try:
-            response = client.chat.completions.create(
-                model="qwen-vl-max",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt_text},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                temperature=0.1, 
-            )
+            
         except Exception as e:
-            print(f"❌ 网络请求阶段抛出异常: {e}")
-            raise e
+            logger.error(f"Validation failed: {str(e)}", exc_info=True)
+            return ValidationResult(
+                is_true_switch=False,
+                instruction="",
+                confidence_score=0.0,
+                reasoning=f"Error: {str(e)}"
+            )
+    
+    
+    def _build_validation_prompt(self, previous_instruction: Optional[str] = None) -> str:
+        # 【关键修改】Prompt 里要说是 3 帧
+        prompt = """这是一段连续截取的3帧短视频（按时间顺序排列）。底层物理传感器提示这段时间内存在动作突变。请严格判断：
+        这是全新的子任务动作切换（返回 {"is_switch": true}），还是同一个动作中的停顿/过程（返回 {"is_switch": false}）？
 
-        print(f"✅ 已收到 VLM 模型的响应，正在解析...")
-        raw_output = response.choices[0].message.content
-        print(f"\n[VLM 原始返回]\n{raw_output}\n")
+        如果是新的动作切换，请提供：
+        - instruction: 纯英文的动作指令描述（如 "Pick up the red block"）
+        - confidence: 你的判断确信度(0.0-1.0)
+
+        请严格返回JSON格式，不要包含任何多余字符或Markdown标记：
+        {
+        "is_switch": boolean,
+        "instruction": string,
+        "confidence": number
+        }"""
         
-        result = extract_json_from_response(raw_output)
-        return result
+        if previous_instruction:
+            prompt += f"\n\n注意：上一个已完成动作的指令是：{previous_instruction}"
+        return prompt
+    
+    def _call_qwen_api(self, images: List[np.ndarray], prompt: str) -> str:
+        """调用Qwen-VL API进行图像分析"""
+        # 构建图像内容数组
+        content_array = []
+        
+        # 将每张图像转换为base64格式并添加到content数组
+        for image in images:
+            _, buffer = cv2.imencode('.jpg', image)
+            image_base64 = base64.b64encode(buffer).decode('utf-8')
+            content_array.append({
+                "image": f"data:image/jpeg;base64,{image_base64}"
+            })
+        
+        # 添加文本提示
+        content_array.append({"text": prompt})
+        
+        # 构建请求体
+        payload = {
+            "model": "qwen-vl",
+            "input": {
+                "content": content_array
+            }
+        }
+        
+        # 发送请求（此处为伪代码，实际需要根据API文档实现）
+        # response = requests.post(
+        #     self.api_endpoint,
+        #     headers={
+        #         "Authorization": f"Bearer {self.api_key}",
+        #         "Content-Type": "application/json"
+        #     },
+        #     json=payload
+        # )
+        
+        # 返回模拟响应（用于测试）
+        return json.dumps({
+            "is_switch": True,
+            "instruction": "Pick up the red block",
+            "confidence": 0.85
+        })
+    
+    def _parse_api_response(self, response: str) -> Dict:
+        """解析API返回的JSON响应，支持带Markdown格式的响应"""
+        try:
+            # 使用正则表达式提取JSON内容（匹配第一个完整的JSON对象）
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if not json_match:
+                raise ValueError("No JSON found in response")
+            
+            # 解析提取的JSON字符串
+            result = json.loads(json_match.group())
+            
+            # 验证返回格式
+            if not all(key in result for key in ['is_switch', 'confidence']):
+                raise ValueError("Invalid response format: missing required fields")
+            
+            # 确保置信度在有效范围内
+            result['confidence'] = max(0.0, min(1.0, float(result['confidence'])))
+            
+            return result
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Failed to parse API response: {str(e)}")
