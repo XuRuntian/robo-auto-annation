@@ -7,8 +7,9 @@ from src.core.physics.base import BasePhysicsDetector
 from src.core.types import CutPoint
 
 class KMeansPhysicsDetector(BasePhysicsDetector):
-    def __init__(self, fps=30):
+    def __init__(self, fps=30, n_clusters: int = None):
         self.fps = fps
+        self.n_clusters = n_clusters
 
     def compute_energy(self, qpos_data):
         velocity = np.diff(qpos_data, axis=0, prepend=qpos_data[0:1])
@@ -72,7 +73,8 @@ class KMeansPhysicsDetector(BasePhysicsDetector):
         ])
         
         # 3. KMeans聚类
-        kmeans = KMeans(n_clusters=9, random_state=42, n_init=10)
+        n_clusters = self.n_clusters if self.n_clusters is not None else max(3, len(active_qpos) // 40)
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
         kmeans.fit(features)
         
         key_indices = []
@@ -83,8 +85,8 @@ class KMeansPhysicsDetector(BasePhysicsDetector):
             
         # 4. 保证唯一性和数量
         key_indices = sorted(list(set(key_indices)))
-        while len(key_indices) < 9:
-            fallback = np.linspace(start, end, 9, dtype=int).tolist()
+        while len(key_indices) < n_clusters:
+            fallback = np.linspace(start, end, n_clusters, dtype=int).tolist()
             key_indices = sorted(list(set(key_indices + fallback)))[:9]
             
         # 5. 构建CutPoint列表

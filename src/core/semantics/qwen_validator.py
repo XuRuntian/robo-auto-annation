@@ -45,7 +45,8 @@ class QwenSemanticValidator(BaseSemanticValidator):
     
     def validate_point(self, window_data: Dict[str, List[np.ndarray]], 
                       physics_energy: float, 
-                      previous_instruction: Optional[str] = None) -> ValidationResult:
+                      previous_instruction: Optional[str] = None,
+                      expected_next_step: str = "") -> ValidationResult:
         try:
             window_results = []
             instructions = []
@@ -115,37 +116,32 @@ class QwenSemanticValidator(BaseSemanticValidator):
                 reasoning=f"Error: {str(e)}"
             )
     
-    def _build_validation_prompt(self, previous_instruction: Optional[str] = None) -> str:
-        prompt = """You are an expert robotic data annotator. 
-You are given a sequence of 3 continuous keyframes of a robot performing a task.
-Underlying physical sensors indicate a sudden change in motion or energy during these 3 frames.
+    def _build_validation_prompt(self, expected_next_step: str) -> str:
+        prompt = """You are a highly precise robotic data annotator.
+        You are given a sequence of 3 keyframes (representing a local time window).
+        A physical change-point detection algorithm (Pelt) has flagged this window as a potential transition due to energy/velocity fluctuations.
 
-[Task]
-Determine if the robot has transitioned to a NEW MACRO-LEVEL SUBTASK (e.g., from "reaching" to "grasping", or "moving" to "placing"), or if it is just a minor pause/adjustment within the same action.
+        [Your Mission]
+        Your job is to determine if this window represents a genuine SEMANTIC SWITCH to a new macro-level subtask.
 
-[Output Format]
-Output ONLY a strict JSON object. Do not output any reasoning or explanatory text.
-The JSON must strictly contain these keys:
-- "is_switch" (boolean): true if this is a new macro-level subtask, false otherwise.
-- "instruction" (string): If is_switch is true, write a short English instruction for the NEW subtask (e.g., "Robotic arm grasps the object"). If false, leave it as an empty string "".
-- "confidence" (float): A number between 0.0 and 1.0 indicating your certainty.
+        [Action Persistence Principle - READ CAREFULLY]
+        - DO NOT over-segment. Minor speed adjustments, jitter, or pauses within the SAME logical action are NOT switches.
+        - Return "is_switch": false if the robot is still pursuing the SAME goal as the previous subtask.
+        - Return "is_switch": true ONLY if there is a fundamental change in the nature of interaction, the target object, or the intended sub-goal (e.g., from 'approaching' to 'grasping', or 'moving' to 'releasing').
 
---- Example JSON Output (If a new action starts) ---
-{
-    "is_switch": true,
-    "instruction": "Robotic arm grasps the red block",
-    "confidence": 0.95
-}
+        [Output Format]
+        Output ONLY a strict JSON object. No conversational text.
+        {
+            "is_switch": boolean,
+            "instruction": "If is_switch is true, write a short goal-oriented English instruction for the NEW subtask. Otherwise, leave it empty.",
+            "confidence": float (0.0 to 1.0),
+            "reasoning": "A very brief explanation of why this is or isn't a new subtask (e.g., 'Still moving toward the cube' or 'Grasp initiated')"
+        }
+        """
+        # 使用标准流程步骤进行判断
+        prompt += f"\n[任务标准流程]\n当前阶段应执行的操作是: '{expected_next_step}'.\n"
+        prompt += "请严格依据上述标准流程判断，当前帧序列是否标志着机器人已成功切入该步骤。"
 
---- Example JSON Output (If it's just a pause/adjustment, no new task) ---
-{
-    "is_switch": false,
-    "instruction": "",
-    "confidence": 0.85
-}
-"""
-        if previous_instruction:
-            prompt += f"\nNote: The instruction for the PREVIOUS subtask was: '{previous_instruction}'"
         return prompt
     
     def _call_qwen_api(self, images: List[np.ndarray], prompt: str) -> str:
