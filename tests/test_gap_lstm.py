@@ -105,7 +105,7 @@ def test_lstm_smoothing():
     traj_len = len(qpos_array)
 
     # ================= 1. 运行双臂底层变点检测 (System 1) =================
-    penalty_value = 1.7
+    penalty_value = 1.5
     
     # 检测右臂
     right_arm_data = extract_single_arm(qpos_array, "right")
