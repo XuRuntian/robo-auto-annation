@@ -193,7 +193,7 @@ def test_lstm_smoothing():
     raw_phases.append((current_phase[0], current_phase[-1]))
 
     # 3. 核心修复 1：合并距离过近的段落 (Merge)
-    min_gap = 10  # ⚡ 关键参数：间隔少于 25 帧的波峰强制合并
+    min_gap = 25  # ⚡ 关键参数：间隔少于 25 帧的波峰强制合并
     merged_phases = []
     for p in raw_phases:
         if not merged_phases:
