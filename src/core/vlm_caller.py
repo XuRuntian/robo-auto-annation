@@ -1,124 +1,216 @@
+"""
+QwenVLCaller 类实现用于机器人自动化标注流的多模态大模型调用器
+
+该模块提供了一个高可用、高扩展性的类，用于调用阿里云 Qwen-VL 或其他兼容 OpenAI 格式的多模态大模型。
+"""
+
 import os
 import json
 import base64
 import re
+import logging
+import io
+from typing import List, Optional, Union, Dict, Any
+from PIL import Image
 from openai import OpenAI
-import httpx # 用于配置底层网络超时和代理
+import httpx
 
-def encode_image_to_base64(image_path):
-    """将本地图片转换为 Base64 编码"""
-    with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode('utf-8')
+# 配置日志记录
+logger = logging.getLogger(__name__)
 
-def extract_json_from_response(text: str) -> list:
-    """健壮的 JSON 提取器"""
-    json_pattern = re.compile(r'```(?:json)?\s*(.*?)\s*```', re.DOTALL)
-    match = json_pattern.search(text)
-    if match:
-        json_str = match.group(1)
-    else:
-        start_idx = text.find('[')
-        end_idx = text.rfind(']')
-        if start_idx != -1 and end_idx != -1:
-            json_str = text[start_idx:end_idx+1]
-        else:
-            json_str = text
-            
-    try:
-        return json.loads(json_str)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"无法从 VLM 响应中解析 JSON。原始响应:\n{text}\n错误: {e}")
-
-def call_qwen_vl_api(image_path: str, global_task_desc: str) -> list:
-    """调用阿里云 Qwen-VL 模型并返回解析好的 JSON List"""
+class QwenVLCaller:
+    """
+    QwenVLCaller 类用于调用阿里云 Qwen-VL 或其他兼容 OpenAI 格式的多模态大模型
     
-    api_key = os.environ.get("DASHSCOPE_API_KEY")
-    if not api_key:
-        raise ValueError("未找到 DASHSCOPE_API_KEY 环境变量，请先设置！")
-
-    # 1. 强制阿里云域名不走系统 VPN/代理（国内服务器挂代理必断连）
-    os.environ["NO_PROXY"] = "dashscope.aliyuncs.com,aliyuncs.com"
-
-    # 2. 修复了 URL 格式，并配置底层的 http 客户端（设置 120 秒超时）
-    http_client = httpx.Client(
-        timeout=httpx.Timeout(120.0), # 给大图片上传留足时间
-    )
-
-    client = OpenAI(
-        api_key=api_key,
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1", # 👈 这里的网址必须是纯净的！
-        http_client=http_client
-    )
-
-    prompt_text = f"""You are an expert robotic data annotator. You are given a 3x3 image grid containing 9 sequential keyframes (labeled [1] to [9]) of a robot performing a task.
-
-    [Global Context & Prior Knowledge]
-    The user has provided the following background information about the task and the robot's morphology:
-    "{global_task_desc}"
-    CRITICAL: Strictly adhere to this context. Identify the robot type (e.g., single-arm, dual-arms, humanoid, mobile base) and objects EXACTLY as described. Do not hallucinate unrelated objects.
-
-    [Granularity & Action Rules] - READ CAREFULLY
-    You must segment the entire process into MACRO-LEVEL "Subtasks" based on the logical phases of the task. Do NOT over-segment into micro-movements.
-    1. Identify the actor dynamically: Based on the context, explicitly state the active component (e.g., "Robotic arm", "Left gripper", "Mobile base", "Hand").
-    2. Merge related micro-actions into goal-oriented subtasks:
-    - If the task involves grasping: Merge "approaching" and "grasping" into a single subtask (e.g., "Robotic arm approaches and grasps the object"). DO NOT split them into two steps.
-    - If the task involves moving an object: Merge "lifting", "moving", and "placing/releasing" into a single subtask (e.g., "Gripper moves the object to the target and releases it").
-    - For other tasks (e.g., navigating, pushing, tool use): Group continuous actions that serve a single logical sub-goal.
-    3. Independence: If multiple arms or components are working sequentially, separate their actions into different subtasks.
-
-    [Language Requirement]
-    Even if the Global Context is provided in Chinese, the final `instruction` values in the JSON MUST BE TRANSLATED TO AND WRITTEN IN ENGLISH.
-
-    [Output Format]
-    Output ONLY a strict JSON list of subtasks. Do not output any reasoning or explanatory text.
-    The JSON must strictly contain these keys: "subtask_id" (int), "instruction" (English string), "start_image" (int, 1-9), "end_image" (int, 1-9).
-
-    --- Example JSON Output (for a generic pick-and-place task) ---
-    [
-    {{
-        "subtask_id": 1,
-        "instruction": "Robotic arm approaches and grasps the target object",
-        "start_image": 1,
-        "end_image": 3
-    }},
-    {{
-        "subtask_id": 2,
-        "instruction": "Robotic arm moves the object and places it into the destination",
-        "start_image": 3,
-        "end_image": 6
-    }}
-    ]
+    Attributes:
+        model_name: 使用的模型名称
+        temperature: 生成文本的温度参数
+        max_tokens: 最大生成 token 数量
+        timeout: 请求超时时间
+        api_key: API 访问密钥
+        client: OpenAI 客户端实例
     """
 
-    base64_image = encode_image_to_base64(image_path)
-    print(f"📸 图片转 Base64 成功，体积大小约为: {len(base64_image) / 1024 / 1024:.2f} MB")
-    print(f"🚀 正在建立与阿里云百炼的连接，请耐心等待 10-30 秒...")
-
-    try:
-        response = client.chat.completions.create(
-            model="qwen-vl-max",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt_text},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}"
-                            }
-                        }
-                    ]
-                }
-            ],
-            temperature=0.1, 
+    def __init__(
+        self,
+        model_name: str = "qwen-vl-max",
+        temperature: float = 0.1,
+        max_tokens: int = 1024,
+        timeout: float = 120.0,
+        base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        api_key: Optional[str] = None
+    ):
+        """
+        初始化 QwenVLCaller 实例
+        
+        Args:
+            model_name: 使用的模型名称，默认为 "qwen-vl-max"
+            temperature: 生成文本的温度参数，默认为 0.1
+            max_tokens: 最大生成 token 数量，默认为 1024
+            timeout: 请求超时时间，默认为 120.0 秒
+            base_url: API 基础 URL，默认为阿里云百炼兼容版URL
+            api_key: API 访问密钥，默认从环境变量获取
+            
+        Raises:
+            ValueError: 如果未提供 api_key 且环境变量中也未找到
+        """
+        # 设置环境变量防止代理断连
+        os.environ["NO_PROXY"] = "dashscope.aliyuncs.com,aliyuncs.com"
+        
+        # 获取 API 密钥
+        self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY")
+        if not self.api_key:
+            raise ValueError("API key not provided and DASHSCOPE_API_KEY environment variable not found")
+        
+        # 配置 HTTP 客户端
+        http_client = httpx.Client(timeout=httpx.Timeout(timeout))
+        
+        # 初始化 OpenAI 客户端
+        self.client = OpenAI(
+            api_key=self.api_key,
+            base_url=base_url,
+            http_client=http_client
         )
-    except Exception as e:
-        print(f"❌ 网络请求阶段抛出异常: {e}")
-        raise e
+        
+        self.model_name = model_name
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.timeout = timeout
 
-    print(f"✅ 已收到 VLM 模型的响应，正在解析...")
-    raw_output = response.choices[0].message.content
-    print(f"\n[VLM 原始返回]\n{raw_output}\n")
-    
-    return extract_json_from_response(raw_output)
+    def _encode_pil_image_to_base64(self, image: Image.Image, max_size: int = 1024) -> str:
+        """
+        将 PIL 图像编码为 base64 格式
+        
+        Args:
+            image: 需要编码的 PIL 图像对象
+            max_size: 图像最大尺寸，默认为 1024
+            
+        Returns:
+            str: base64 编码的图像字符串
+        """
+        # 转换为 RGB 模式（丢弃透明通道）
+        if image.mode in ('RGBA', 'P'):
+            image = image.convert('RGB')
+            
+        # 计算缩放比例
+        width, height = image.size
+        if max(width, height) > max_size:
+            ratio = max_size / max(width, height)
+            new_size = (int(width * ratio), int(height * ratio))
+            image = image.resize(new_size, Image.Resampling.LANCZOS)
+            
+        # 将图像保存为 JPEG 格式
+        buffered = io.BytesIO()
+        image.save(buffered, format="JPEG", quality=85)
+        
+        # 返回 base64 编码
+        return base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+    def extract_json(self, text: str) -> Union[dict, list]:
+        """
+        从文本中提取 JSON 数据
+        
+        Args:
+            text: 包含 JSON 的原始文本
+            
+        Returns:
+            Union[dict, list]: 提取的 JSON 对象或数组
+            
+        Raises:
+            ValueError: 如果无法提取到有效的 JSON
+        """
+        # 优先级 1: 查找 Markdown 格式的 JSON（增强兼容性）
+        markdown_match = re.search(r'```json\s*([\s\S]*?)\s*```', text, re.DOTALL)
+        if markdown_match:
+            try:
+                return json.loads(markdown_match.group(1))
+            except json.JSONDecodeError as e:
+                logger.error("Failed to parse JSON from markdown block: %s. Error: %s", 
+                            markdown_match.group(1), str(e))
+                raise ValueError(f"Failed to extract JSON from markdown block. Original text: {text}") from None
+                
+        # 优先级 2: 查找最外层的 JSON 结构
+        try:
+            # 先尝试整个文本解析
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # 寻找最外层的 JSON 结构
+            start_brace = text.find('{')
+            start_bracket = text.find('[')
+            
+            if start_brace == -1 and start_bracket == -1:
+                logger.error("No JSON structure found in text: %s", text)
+                raise ValueError(f"No JSON structure found. Original text: {text}")
+                
+            # 确定起始位置
+            start_pos = min((pos for pos in [start_brace, start_bracket] if pos != -1))
+            
+            # 寻找结束位置
+            end_brace = text.rfind('}')
+            end_bracket = text.rfind(']')
+            
+            if end_brace == -1 and end_bracket == -1:
+                logger.error("No closing bracket/brace found in text: %s", text)
+                raise ValueError(f"No closing bracket/brace found. Original text: {text}")
+                
+            end_pos = max((pos for pos in [end_brace, end_bracket] if pos != -1))
+            
+            try:
+                return json.loads(text[start_pos:end_pos+1])
+            except json.JSONDecodeError as e:
+                logger.error("Failed to parse extracted JSON: %s. Error: %s", 
+                            text[start_pos:end_pos+1], str(e))
+                raise ValueError(f"Failed to extract JSON. Original text: {text}") from e
+
+    def generate(
+        self,
+        prompt: str,
+        images: Optional[List[Image.Image]] = None,
+        system_prompt: Optional[str] = "You are a helpful and precise robotic expert."
+    ) -> str:
+        # 1. 构建基础消息结构
+        messages = [
+            {"role": "system", "content": system_prompt}
+        ]
+        
+        # 2. 构造多模态用户内容
+        user_content = [{"type": "text", "text": prompt}]
+        
+        # 处理图像
+        if images:
+            for img in images:
+                try:
+                    # 确保编码过程不会因为单张图损坏而中断整个流程
+                    img_base64 = self._encode_pil_image_to_base64(img)
+                    user_content.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{img_base64}"
+                        }
+                    })
+                except Exception as e:
+                    logger.error(f"Failed to encode image: {e}")
+                    continue
+        
+        messages.append({"role": "user", "content": user_content})
+        
+        # 3. 发起请求并增加安全校验
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens
+            )
+            
+            # 检查响应有效性
+            if not response.choices or len(response.choices) == 0:
+                logger.warning("VLM returned an empty choice list.")
+                return ""
+                
+            content = response.choices[0].message.content
+            return content.strip() if content else ""
+            
+        except Exception as e:
+            logger.error(f"VLM API request failed: {e}")
+            raise  # 或者返回空字符串，取决于你的重试策略

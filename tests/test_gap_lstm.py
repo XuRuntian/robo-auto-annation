@@ -3,6 +3,7 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
+from PIL import Image
 import ruptures as rpt
 import rerun as rr
 # 确保能导入你的 src 模块
@@ -259,5 +260,161 @@ def test_lstm_smoothing():
     print("✅ Rerun 同步完成。请在 Rerun UI 中查看多视角图像与曲线。")
 
     print("✅ Rerun 数据流传输完成。")
+
+# ================= 5. 结合 VLM 提取高级语义 (Physics-First Labeling) =================
+    print("\n🤖 正在启动 VLM 进行语义打标...")
+    
+    # 统一导入，避免作用域问题
+    from PIL import Image as PILImage
+    import sys
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    from src.core.vlm_caller import QwenVLCaller 
+    
+    # 初始化 VLM
+    vlm_caller = QwenVLCaller() 
+    
+    # 1. 根据物理 Phase 边界，生成连续的 Action Chunks
+    # 这里我们认为：[上一个变点结束, 当前变点结束] 为一个完整动作块
+    action_chunks = []
+    last_end = 0
+    for p_start, p_end in final_phases:
+        action_chunks.append({
+            "chunk_start": last_end,
+            "chunk_end": p_end,
+            # 💡 策略：在动作转换期（p_start-p_end）之前的“平稳期”抽帧，识别更准
+            "stable_start": last_end,
+            "stable_end": max(last_end, p_start - 1)
+        })
+        last_end = p_end + 1
+        
+    # 处理最后一个收尾的 Chunk
+    if last_end < traj_len:
+        action_chunks.append({
+            "chunk_start": last_end,
+            "chunk_end": traj_len - 1,
+            "stable_start": last_end,
+            "stable_end": traj_len - 1
+        })
+    previous_label = "None (task just started)"
+    all_final_labels = []
+    # 2. 遍历每个 Chunk，智能抽帧并让 VLM 命名
+    for idx, chunk in enumerate(action_chunks):
+        c_start, c_end = chunk["chunk_start"], chunk["chunk_end"]
+        s_start, s_end = chunk["stable_start"], chunk["stable_end"]
+        
+        # 即使平稳期很短，也确保能抽出帧
+        if s_end < s_start:
+            s_end = s_start
+            
+        # 均匀抽取 3 个关键帧
+        sample_indices = np.linspace(s_start, s_end, num=3, dtype=int)
+        
+        # ✅ 核心修复：这个列表只存放转换后的 PIL 对象
+        pil_images_for_vlm = []
+        
+        for frame_idx in sample_indices:
+            frame_data = reader.get_frame(frame_idx)
+            if frame_data is None:
+                continue
+
+            # 1. 选择相机 (优先选头部/前视相机)
+            cam_name = 'cam_front_head_rgb' if 'cam_front_head_rgb' in frame_data.images else list(frame_data.images.keys())[0]
+            img_array = frame_data.images[cam_name]
+            
+            # 2. 稳健的图像转换流程
+            try:
+                # 确保是 Numpy 数组
+                if not isinstance(img_array, np.ndarray):
+                    img_array = np.array(img_array)
+                
+                # 处理维度顺序 (C, H, W) -> (H, W, C)
+                if img_array.ndim == 3 and img_array.shape[0] in [1, 3, 4]:
+                    img_array = np.transpose(img_array, (1, 2, 0))
+                
+                # 处理数据类型和值域 (0.0-1.0 -> 0-255)
+                if img_array.dtype == np.float32 or img_array.dtype == np.float64:
+                    img_array = (img_array * 255).clip(0, 255).astype(np.uint8)
+                elif img_array.dtype != np.uint8:
+                    img_array = img_array.astype(np.uint8)
+                
+                # 转换为 PIL 并添加到列表
+                pil_img = PILImage.fromarray(img_array)
+                pil_images_for_vlm.append(pil_img)
+                
+            except Exception as e:
+                print(f"⚠️ 无法处理第 {frame_idx} 帧图像: {e}")
+
+        if not pil_images_for_vlm:
+            print(f"⏩ Chunk {idx+1} 无有效图像，跳过。")
+            continue
+
+        # 3. 构造给 VLM 的 Prompt
+        # 1. 定义动态的任务描述变量（可以从数据集中读取）
+        
+# ==================== 3. 构造给 VLM 的进度感知 Prompt (泛用型) ====================
+        
+        # 1. 任务全局描述 (支持任意任务)
+        task_description = "Pour water or beverage into the cup using one hand."
+        
+        # 2. 核心创新：计算动态进度条并转化为语言提示 (Temporal Grounding)
+        # 1. 语义化位置描述（非硬性阈值）
+        total_chunks = len(action_chunks)
+        if idx == 0:
+            position_context = "This is the initial interaction with the environment."
+        elif idx == total_chunks - 1:
+            position_context = "This is the final segment of the recorded sequence."
+        else:
+            # 描述它在序列中的相对位置，但不下定义
+            position_context = f"This is an intermediate segment (Chunk {idx+1} of {total_chunks})."
+
+        # 2. 引入物理动能描述 (利用 LSTM 的输出或物理差异)
+        # 如果该 Chunk 覆盖了 LSTM 的概率波峰，说明它是“动作剧烈转换期”
+        in_phase = any(p_start <= c_start <= p_end for p_start, p_end in final_phases)
+        dynamic_hint = "Noticeable state transition detected via physical sensors." if in_phase else "The physical state is relatively stable."
+
+        # 3. 整理全局历史，让 VLM 拥有时序记忆
+        history_str = " -> ".join(all_final_labels) if all_final_labels else "None (Task just started)"
+        
+        # 4. 构造强逻辑约束的 Prompt，纯靠提示工程与进度防跳变
+        prompt = f"""You are an expert roboticist.
+        TASK GOAL: {task_description}
+
+        SCENE CONTEXT:
+        - Sequence Position: {position_context}
+        - Physical Dynamics: {dynamic_hint}
+        - Previous Action: {all_final_labels[-1] if all_final_labels else "None (Start)"}
+
+        OBSERVATION STRATEGY:
+        1. Compare the 3 images to identify the movement direction and state change.
+        2. If the 'Physical Dynamics' hint is 'stable', the robot is likely continuing the previous action or performing a steady-state subtask (e.g., constant pouring).
+        3. If the 'Physical Dynamics' hint is 'transition', look for a change in contact, grasp, or trajectory.
+        4. Align your description with the overall goal: Is the robot approaching, interacting, or withdrawing?
+
+        OUTPUT REQUIREMENT:
+        Provide a concise imperative action label (e.g., 'move to cup', 'pour water', 'retract arm'). 
+        NO punctuation. NO chatter.
+        """
+        
+        print(f"\n📦 [Chunk {idx+1}/{len(action_chunks)}] Frame {c_start} -> {c_end} (抽帧: {sample_indices})")
+        print(f"   📖 历史记忆: [{history_str}]")
+        
+        # 4. 调用 VLM
+        try:
+            semantic_label = vlm_caller.generate(prompt=prompt, images=pil_images_for_vlm)
+            
+            # 清洗标签（去除多余标点和换行）
+            semantic_label = semantic_label.strip().replace('.', '').replace('"', '').replace("'", "")
+
+            print(f"   💬 VLM 语义标签: {semantic_label}")
+
+            # 更新历史
+            previous_label = semantic_label
+            chunk["instruction"] = semantic_label
+            all_final_labels.append(semantic_label)
+            
+        except Exception as e:
+            print(f"   ❌ VLM 调用失败: {e}")
+
+    print("\n✅ 所有 Action Chunks 标注完成。")
 if __name__ == "__main__":
     test_lstm_smoothing()
