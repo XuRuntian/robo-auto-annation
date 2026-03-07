@@ -14,42 +14,55 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.core.factory import ReaderFactory
 from src.core.physics.gap.costdirection import CostDirection
 import matplotlib.pyplot as plt
-
-def build_robotics_pamor_prompt(kinematic_json, task_description="Pour water or beverage into the cup using one hand"):
+# 推荐的 task_history 拼接逻辑
+def update_history(current_history, latest_vlm_output):
+    # 策略：只保留最新的动作元组，过滤掉掉无意义的说明文字
+    # 提取类似 [{start, end}, (arm, action, object...)] 的行
+    important_lines = re.findall(r'\[\{.*\}\].*', latest_vlm_output)
+    
+    new_segment = "\n".join(important_lines)
+    
+    # 拼接：保持时序感
+    updated_history = current_history + f"\n--- Previous Chunk Actions ---\n" + new_segment
+    
+    # 如果任务非常长，可以只保留最近 2-3 个 Chunk 的记录
+    # 防止因为文本过长导致模型对“远古”信息的误解
+    return updated_history
+def build_robotics_pamor_prompt(kinematic_json, task_description, task_history):
     kinematics_str = json.dumps(kinematic_json, ensure_ascii=False)
     
     prompt = f"""You are an expert in describing robotic motion content for embodied AI. I will give you 32 frames of "video frames" uniformly extracted from a robot manipulation trajectory, input them in chronological order, and provide you with kinematic posture information corresponding to this sequence.
-Please analyze the visual content based on the video frames and posture information, and output the motion description of the robot in the video.
+    Please analyze the visual content based on the video frames and posture information, and output the motion description of the robot in the video.
 
-TASK GOAL OF THIS EPISODE: {task_description}
+    TASK GOAL OF THIS EPISODE: {task_description}
+    TASK HISTORY: {task_history}
+    The format of the kinematic information is as follows: "{{\"vel\": overall_velocity, \"angle\": overall_angular_velocity, \"vel_score\": ..., \"frame_angles\": {{\"frame_idx\": [{{\"joint_name\": joint_angle}}]}}}}".
+    The posture information analyzes motion from the perspectives of end-effector translation and joint rotation. 'vel' corresponds to the movement rate of the end-effectors, while 'angle' and Euler angles ('rx', 'ry', 'rz') represent the rotational transformation of the arms. You need to pay special attention to the Euler angles for orientation changes (like pouring) and the 'gripper' value for grasping actions.
 
-The format of the kinematic information is as follows: "{{\"vel\": overall_velocity, \"angle\": overall_angular_velocity, \"vel_score\": ..., \"frame_angles\": {{\"frame_idx\": [{{\"joint_name\": joint_angle}}]}}}}".
-The posture information analyzes motion from the perspectives of end-effector translation and joint rotation. 'vel' corresponds to the movement rate of the end-effectors, while 'angle' and Euler angles ('rx', 'ry', 'rz') represent the rotational transformation of the arms. You need to pay special attention to the Euler angles for orientation changes (like pouring) and the 'gripper' value for grasping actions.
+    The specific description rules are as follows:
+    1. Please accurately identify all the subjects (e.g., right arm, left arm, right gripper) and objects/backgrounds in the video, and refer to them with specific words.
+    2. The description of the robot's action needs to be fine-grained. Use precise robotic manipulation verbs (e.g., reach, grasp, retract, rotate, pour, hold) and reflect the intensity and direction of the action.
+    3. Then output "[{{0, 31}}]" at the beginning of the first line, which means that this sequence description starts from the 0th frame and ends at the 31st frame.
+    4. We stipulate that movement is divided into robot-level (movement of the overall robot base/torso, if any), arm-level (movement of the main robotic arms in 3D space), and gripper-level (movement of the end-effectors/grippers, such as opening, closing, or holding). Please output "robot-level" in the second line, then output all robot-level information, output "arm-level" in a new line, output all arm-level information, and then output "gripper-level" in a new line, and output all gripper-level information.
+    5. Output all the moving subjects you can observe by line, using the format we call motion-unit, which is "[{{begin_frame, end_frame}}, (motion_subject, motion, motion_object, motion_adverbial, motion_amplitude), (motion_subject, modifiers_subject), (motion_object, modifiers_object)]", where the first unit indicates the start and end frame of the motion. The second unit represents the subject of the action, the action description, the receptor of the action, the adverbial of the action, and the amplitude of the action. The third unit represents the modifier of the subject, and the fourth unit represents the modifier of the receptor. Each action is output in one line.
+    6. For the description of direction, please use the camera-centered or robot-centered perspective (e.g., "toward the cup", "downward").
+    7. If a robotic arm or gripper remains motionless in the video, please use the same format to describe its state (e.g., holding still).
+    8. Please use English to answer, no need to worry about the length limit.
+    9. This is an explanation of each specific element in motion-unit:
+    - motion_subject: the agent of motion (e.g., right_arm, left_gripper)
+    - motion_object: the object being manipulated (e.g., cup, water_pitcher, none)
+    - motion: the specific manipulation verb (e.g., rotate, pour, move)
+    - motion_adverbial: the direction or spatial relation (e.g., downward, towards the table)
+    - motion_amplitude: the speed or intensity (e.g., slow, moderate, steady, fast)
+    - modifiers_subject: feature description of the robot part (e.g., right manipulator)
+    - modifiers_object: feature description of the object (e.g., red cup, clear bottle, none)
+    10. All kinematic values in the posture information correspond to specific fine-grained motions. Combined with the posture information and the video frame content, accurately define the start and end frames of each motion unit. Pay special attention to sudden jumps in Euler angles (which often indicate actions like pouring/flipping) and stabilize the boundaries.
 
-The specific description rules are as follows:
-1. Please accurately identify all the subjects (e.g., right arm, left arm, right gripper) and objects/backgrounds in the video, and refer to them with specific words.
-2. The description of the robot's action needs to be fine-grained. Use precise robotic manipulation verbs (e.g., reach, grasp, retract, rotate, pour, hold) and reflect the intensity and direction of the action.
-3. Then output "[{{0, 31}}]" at the beginning of the first line, which means that this sequence description starts from the 0th frame and ends at the 31st frame.
-4. We stipulate that movement is divided into robot-level (movement of the overall robot base/torso, if any), arm-level (movement of the main robotic arms in 3D space), and gripper-level (movement of the end-effectors/grippers, such as opening, closing, or holding). Please output "robot-level" in the second line, then output all robot-level information, output "arm-level" in a new line, output all arm-level information, and then output "gripper-level" in a new line, and output all gripper-level information.
-5. Output all the moving subjects you can observe by line, using the format we call motion-unit, which is "[{{begin_frame, end_frame}}, (motion_subject, motion, motion_object, motion_adverbial, motion_amplitude), (motion_subject, modifiers_subject), (motion_object, modifiers_object)]", where the first unit indicates the start and end frame of the motion. The second unit represents the subject of the action, the action description, the receptor of the action, the adverbial of the action, and the amplitude of the action. The third unit represents the modifier of the subject, and the fourth unit represents the modifier of the receptor. Each action is output in one line.
-6. For the description of direction, please use the camera-centered or robot-centered perspective (e.g., "toward the cup", "downward").
-7. If a robotic arm or gripper remains motionless in the video, please use the same format to describe its state (e.g., holding still).
-8. Please use English to answer, no need to worry about the length limit.
-9. This is an explanation of each specific element in motion-unit:
-   - motion_subject: the agent of motion (e.g., right_arm, left_gripper)
-   - motion_object: the object being manipulated (e.g., cup, water_pitcher, none)
-   - motion: the specific manipulation verb (e.g., rotate, pour, move)
-   - motion_adverbial: the direction or spatial relation (e.g., downward, towards the table)
-   - motion_amplitude: the speed or intensity (e.g., slow, moderate, steady, fast)
-   - modifiers_subject: feature description of the robot part (e.g., right manipulator)
-   - modifiers_object: feature description of the object (e.g., red cup, clear bottle, none)
-10. All kinematic values in the posture information correspond to specific fine-grained motions. Combined with the posture information and the video frame content, accurately define the start and end frames of each motion unit. Pay special attention to sudden jumps in Euler angles (which often indicate actions like pouring/flipping) and stabilize the boundaries.
+    The kinematic posture information provided is as follows:
+    {kinematics_str}
 
-The kinematic posture information provided is as follows:
-{kinematics_str}
-
-Your English description is:
-"""
+    Your English description is:
+    """
     return prompt
 
 def compute_chunk_kinematics(chunk_data, fps=30, num_samples=32):
@@ -115,35 +128,34 @@ def parse_and_map_vlm_output(vlm_text, global_indices):
     parsed_actions = []
     current_level = "unknown"
     
-    # 改进后的正则表达式：
-    # 1. \[ \{? (\d+) , \s* (\d+) \}? \]  --> 匹配 [{0, 31}] 或 [0, 31]，花括号设为可选
-    # 2. (?: \s* , \s* )?                --> 匹配中间可能存在的逗号和任意空格
-    # 3. \( ([^)]+) \)                   --> 抓取括号内直到右括号的所有内容
-    pattern = r'\[\{(\d+),\s*(\d+)\},\s*\(([^)]+)\)'
+    # --- 升级后的正则表达式 ---
+    # 1. \[ \{? (\d+) , \s* (\d+) \}? \]  --> 花括号 {} 现在是可选的 (? 表示 0 或 1 个)
+    # 2. (?: \s* , \s* )?                --> 兼容括号之间可能有也可能没有的逗号
+    # 3. \( ([^)]+) \)                   --> 抓取核心元组内容
+    pattern = r'\[\{?(\d+),\s*(\d+)\}?,\s*\(([^)]+)\)'
     
     for line in vlm_text.split('\n'):
         line = line.strip()
         if not line: continue
             
         # 识别层级
-        if "robot-level" in line.lower(): current_level = "robot-level"; continue
-        if "arm-level" in line.lower(): current_level = "arm-level"; continue
-        if "gripper-level" in line.lower(): current_level = "gripper-level"; continue
+        low_line = line.lower()
+        if "robot-level" in low_line: current_level = "robot-level"; continue
+        if "arm-level" in low_line: current_level = "arm-level"; continue
+        if "gripper-level" in low_line: current_level = "gripper-level"; continue
             
         # 执行匹配
         match = re.search(pattern, line)
         if match:
             local_start = int(match.group(1))
             local_end = int(match.group(2))
-            
-            # 这里的 group(3) 就是 (robot_base, hold_still, ...) 括号里的内容
             content_str = match.group(3)
             
-            # 统一将冒号替换为逗号，防止 VLM 乱用标点，然后按逗号分割
+            # 💡 容错处理：VLM 有时在元组里用冒号，有时用逗号
+            # 统一把冒号换成逗号，方便后续分割
             elements = [e.strip() for e in content_str.replace(':', ',').split(',')]
             
-            # 只要元素够 5 个（subject, action, object, direction, amplitude）就抓取
-            if len(elements) >= 5:
+            if len(elements) >= 2: # 至少有 subject 和 action
                 # 索引映射
                 local_start = max(0, min(local_start, len(global_indices) - 1))
                 local_end = max(0, min(local_end, len(global_indices) - 1))
@@ -156,9 +168,9 @@ def parse_and_map_vlm_output(vlm_text, global_indices):
                     "global_end_frame": global_end,
                     "subject": elements[0],
                     "action_verb": elements[1],
-                    "object": elements[2],
-                    "direction": elements[3],
-                    "amplitude": elements[4]
+                    "object": elements[2] if len(elements)>2 else "none",
+                    "direction": elements[3] if len(elements)>3 else "none",
+                    "amplitude": elements[4] if len(elements)>4 else "none"
                 })
                 
     return parsed_actions
@@ -222,7 +234,7 @@ def extract_single_arm(qpos_array, arm_type="right"):
 
 def test_lstm_smoothing():
     DATA_PATH = "/home/user/test_data/lerobot/Agilex_Cobot_Magic_pour_water_into_cup_0_qced_hardlink" 
-    use_lstm = False
+    use_lstm = True
     print(f"🚀 加载数据: {DATA_PATH}")
     reader = ReaderFactory.get_reader(DATA_PATH)
     reader.load(DATA_PATH)
@@ -389,12 +401,12 @@ def test_lstm_smoothing():
 
         if not pil_images_for_vlm: continue
         print(f"\n📦 [Chunk {idx+1}/{len(action_chunks)}] 物理数据生成成功！提取了 {len(pil_images_for_vlm)} 帧。")
-        
-        prompt = build_robotics_pamor_prompt(kinematic_json, task_description=task_description)
+        task_history = "Task started."
+        prompt = build_robotics_pamor_prompt(kinematic_json, task_description=task_description, task_history=task_history)
         
         try:
             semantic_label = vlm_caller.generate(prompt=prompt, images=pil_images_for_vlm)
-            
+            task_history = update_history(task_history, semantic_label)
             # 打印 VLM 原始输出以供检查
             print("   💬 VLM 原始输出:")
             print(semantic_label)
