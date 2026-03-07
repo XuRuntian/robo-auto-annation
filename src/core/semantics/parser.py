@@ -35,23 +35,40 @@ class VLMOutputParser:
                 global_start = int(global_indices[local_start])
                 global_end = int(global_indices[local_end])
                 
-                # 3. 查找该行内【所有】的元组 (VLM 可能在一行输出多个)
+                # 3. 查找该行内【所有】的元组
                 tuples = re.findall(self.tuple_pattern, line)
                 
-                for content_str in tuples:
-                    # 分割、去除两端空格，如果为空则强制替换为 "none" (处理 ", , ," 的情况)
-                    elements = [e.strip() if e.strip() else "none" for e in content_str.replace(':', ',').split(',')]
+                if tuples:
+                    # ✅ 核心修复：永远只把第一个 tuple 当作 Core Action
+                    core_tuple = tuples[0]
+                    core_elements = [e.strip() if e.strip() else "none" for e in core_tuple.replace(':', ',').split(',')]
                     
-                    if len(elements) >= 2: # 至少要有 Subject 和 Action
-                        parsed_actions.append({
+                    if len(core_elements) >= 2:
+                        action_dict = {
                             "level": current_level,
                             "global_start_frame": global_start,
                             "global_end_frame": global_end,
-                            "subject": elements[0],
-                            "action_verb": elements[1],
-                            "object": elements[2] if len(elements) > 2 else "none",
-                            "direction": elements[3] if len(elements) > 3 else "none",
-                            "amplitude": elements[4] if len(elements) > 4 else "none"
-                        })
+                            "subject": core_elements[0],
+                            "action_verb": core_elements[1],
+                            "object": core_elements[2] if len(core_elements) > 2 else "none",
+                            "direction": core_elements[3] if len(core_elements) > 3 else "none",
+                            "amplitude": core_elements[4] if len(core_elements) > 4 else "none",
+                            "subject_modifier": "none",
+                            "object_modifier": "none"
+                        }
+                        
+                        # ✅ 解析第二个 tuple (Subject Modifier)
+                        if len(tuples) > 1:
+                            subj_mod = [e.strip() for e in tuples[1].replace(':', ',').split(',')]
+                            if len(subj_mod) > 1:
+                                action_dict["subject_modifier"] = subj_mod[1]
+                                
+                        # ✅ 解析第三个 tuple (Object Modifier)
+                        if len(tuples) > 2:
+                            obj_mod = [e.strip() for e in tuples[2].replace(':', ',').split(',')]
+                            if len(obj_mod) > 1:
+                                action_dict["object_modifier"] = obj_mod[1]
+                                
+                        parsed_actions.append(action_dict)
                         
         return parsed_actions
