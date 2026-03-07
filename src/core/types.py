@@ -1,16 +1,10 @@
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any
 import numpy as np
 
 @dataclass
-class CutPoint:
-    frame_idx: int
-    energy_score: float
-    confidence: float = 1.0
-
-@dataclass
-class ValidationResult:
-    is_true_switch: bool
-    instruction: str
-    confidence_score: float
-    reasoning: str
+class ArmState:
+    """机械臂状态的标准协议"""
+    pos: np.ndarray      # 笛卡尔坐标 (T, 3)
+    rot: np.ndarray      # 旋转欧拉角 (T, 3)
+    gripper: np.ndarray  # 夹爪状态 (T, 1) 或 (T, 2)
+    name: str            # "right" 或 "left"
