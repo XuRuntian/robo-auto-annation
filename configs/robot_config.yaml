@@ -1,0 +1,27 @@
+# 机器人硬件索引配置
+robot:
+  name: "Agilex_Cobot_Magic"
+  # 手臂索引定义 [start, end]
+  arms:
+    right:
+      move: [20, 23]     # 对应 qpos 的索引
+      rotate: [23, 26]
+      gripper: 19
+    left:
+      move: [7, 10]
+      rotate: [10, 13]
+      gripper: 6
+
+# 运动学计算参数
+kinematics:
+  fps: 30
+  num_samples: 32
+  mimic_gripper: true    # 是否将 1 维夹爪映射为 2 维
+
+# 物理切分参数 (Pelt / LSTM)
+segmentation:
+  use_lstm: true
+  penalty_value: 1.5
+  threshold: 0.4
+  min_gap_sec: 0.5       # 转换为秒，增加通用性
+  min_duration_sec: 0.2
