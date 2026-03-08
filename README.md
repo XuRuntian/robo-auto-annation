@@ -1,90 +1,82 @@
-# RoboCoin Viewer 机器人数据查看器 🤖👁️
+# Robo-ETL (robo-auto-annation)
+**物理驱动 + AI语义的具身智能数据集自动化标注流水线**
 
-**基于 Rerun 的具身智能数据集自动化清洗、预览与管理工具**
+## Key Features
+✅ **物理自适应轨迹切分**  
+- 融合 Pelt 变点检测与轻量级 LSTM 的两阶段切分算法  
+- 动态计算 Penalty 项（基于物理特征方差）与 Threshold（基于动作幅度）
 
-## 🔍 核心亮点
-- 📦 **多格式支持**：支持 Unitree、LeRobot、HDF5、ROS（bag/mcap）、原始文件夹等格式
-- 🔍 **智能整理器**：自动识别混杂数据类型并分类归档
-- 🕵️‍♂️ **交互式审阅**：基于 Rerun 的可视化界面 + 键盘快捷键操作
-- 🎥 **并行预览**：首/中/尾帧并行比对快速质检
-- 🧼 **隔离系统**：异常数据自动移动到带时间戳的隔离区
+✅ **智能参数系统**  
+- 自适应调整切分参数，支持从微小操作到大范围移动的全场景标注
 
-![RoboCoin Viewer 演示图](demo.gif) <!-- 图片占位符 -->
+✅ **语义标注流水线**  
+- 集成 VLM（支持 GPT-4o/Gemini）进行因果意图分析  
+- 输出结构化动作语义标签（动词-对象-属性三元组）
 
-## 🛠️ 安装指南
+✅ **多协议支持**  
+- 原生兼容 LeRobot, MCAP/ROS, HDF5 等机器人数据集格式
 
-### 环境要求
-- Python `3.10`（参考 `.python-version`）
-- [Rust](https://rust-lang.org)（Rerun 依赖）
+## Architecture
+```mermaid
+graph LR
+  A[原始数据] -->|Parquet/HDF5| B(物理特征提取)
+  B --> C{自适应切分}
+  C -->|物理边界| D[VLM语义标注]
+  D --> E[结构化JSON输出]
+```
 
-### 安装步骤
+## Configuration
+核心参数在 `configs/robot_config.yaml` 中定义：
+```yaml
+kinematics:
+  fps: 30                 # 动态帧采样率（自动调整）
+segmentation:
+  adaptive: true          # 启用自适应切分算法
+  min_segment: 15         # 最小动作片段帧数
+vlm:
+  model: gpt-4o           # 默认VLM模型
+  api_key: YOUR_API_KEY   # API密钥配置
+```
+
+## Quick Start
 ```bash
-# 克隆仓库
-git clone git@github.com:XuRuntian/robocoin-Viewer.git
-
-# 安装依赖
-cd robocoin-Viewer
+# 依赖安装
 uv sync
+
+# 基础运行
+python main.py \
+  --input data.parquet \
+  --output annotations.json \
+  --format parquet
 ```
 
-## 🚀 快速入门
-```bash
-# 基础用法
-uv run main.py /path/to/your/dataset
+## Technical Highlights
+### 物理特征驱动的自适应切分
+1. **动态惩罚项计算**  
+   基于位置/旋转/夹爪状态的方差计算动态 Penalty：
+   ```python
+   penalty = base_penalty * (1 + σ_position + σ_rotation + σ_gripper)
+   ```
 
-# 跳过交互审阅
-uv run main.py /path/to/your/dataset --skip-review
+2. **15帧保底采样逻辑**  
+   确保每个标注片段满足VLM最小上下文需求：
+   ```python
+   if segment_frames < 15:
+       expand_window(Δt=15 - segment_frames)
+   ```
 
-# 跳过最终预览
-uv run main.py /path/to/your/dataset --no-preview
-```
+### 数据流处理阶段
+1. **物理特征提取**  
+   计算加速度、角速度、夹爪状态变化率等运动学特征
 
-### 键盘操作指南
-| 按键       | 功能              |
-|-----------|-------------------|
-| `←`/`→`    | 切换上下数据集    |
-| `B`       | 标记为异常样本    |
-| `Esc`     | 退出审阅模式      |
+2. **两阶段切分**  
+   - Pelt 预切分：快速识别明显动作边界  
+   - LSTM 精修：处理模糊过渡场景
 
-## 📁 支持格式
-| 格式       | 特征文件                  | 结构特点                     |
-|-----------|----------------------------|------------------------------|
-| Unitree   | `data.json`               | 人形机器人运动数据           |
-| LeRobot   | `meta/info.json` 或 `*.parquet` | 支持智能 chunk 识别          |
-| HDF5      | `*.hdf5`                  | 分层数据格式                 |
-| ROS       | `*.bag` 或 `*.mcap`         | 支持 Bag/MCAP 文件格式       |
-| 原始文件夹 | 任意未结构化数据的文件夹     | 基础文件整理功能             |
+3. **语义标注**  
+   通过 VLM 解析动作序列的因果关系，输出结构化意图描述
 
-## 🌟 工作流程
-### 步骤 1：扫描与整理
-- 递归扫描目录自动识别混合数据类型
-- 自动生成类型专属归档目录：
-  - `Unitree_Data/`
-  - `HDF5_Data/`
-  - `_QUARANTINE_YYYYMMDD/`（异常数据区）
-- 智能 chunk 识别防止误操作
+---
 
-### 步骤 2：交互式审阅
-- 在 Rerun 查看器中可视化序列
-- 键盘快捷键快速导航
-- 使用 `B` 键标记异常样本
-
-### 步骤 3：数据隔离
-- 异常样本自动移动到带时间戳的隔离目录
-- 生成包含以下信息的清单文件：
-  - 原始路径
-  - 隔离时间戳
-  - 隔离原因
-
-## 🧩 项目结构
-```
-src/
-├── core/               # 核心逻辑与业务规则
-├── adapters/           # 格式适配器模块
-└── ui/                 # Rerun 可视化组件
-```
-
-## 📆 未来规划
-- 🛠️ 生成配置文件的常用工作流
-- 📊 增强分析仪表盘
-- 📤 清洗后数据集的导出功能
+**Project maintained by:** [Xu Runtian](https://github.com/XuRuntian)  
+**License:** MIT
