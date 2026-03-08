@@ -11,7 +11,7 @@ def main():
     
     # 3. 传入数据集和人类指令，一键启动
     data_path = "/home/user/test_data/lerobot/Agilex_Cobot_Magic_pour_water_into_cup_0_qced_hardlink"
-    task_desc = "Pour water or beverage into the cup using one hand."
+    task_desc = "Pour water or beverage into the cup using right hand and take back  arm."
     
     pipeline.process_episode(data_path, task_desc)
 
