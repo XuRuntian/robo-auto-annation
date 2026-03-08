@@ -34,7 +34,7 @@ segmentation:
   adaptive: true          # 启用自适应切分算法
   min_segment: 15         # 最小动作片段帧数
 vlm:
-  model: gpt-4o           # 默认VLM模型
+  model: qwen-vl-max           # 默认VLM模型
   api_key: YOUR_API_KEY   # API密钥配置
 ```
 
@@ -44,10 +44,9 @@ vlm:
 uv sync
 
 # 基础运行
-python main.py \
-  --input data.parquet \
-  --output annotations.json \
-  --format parquet
+# 配置APIkey
+export DASHSCOPE_API_KEY=xxxxx
+python main.py 
 ```
 
 ## Technical Highlights
