@@ -21,7 +21,4 @@ kinematics:
 # 物理切分参数 (Pelt / LSTM)
 segmentation:
   use_lstm: true
-  penalty_value: 1.5
-  threshold: 0.4
-  min_gap_sec: 0.5       # 转换为秒，增加通用性
-  min_duration_sec: 0.2
+  adaptive: true

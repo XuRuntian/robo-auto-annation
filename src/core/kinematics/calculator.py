@@ -77,7 +77,8 @@ class KinematicCalculator:
             }
 
         # 3. 关键帧抽样 (frame_angles 逻辑保持不变，因为它已经区分了 r_ 和 l_ 前缀)
-        sample_indices = np.linspace(0, T - 1, num=self.num_samples, dtype=int)
+        actual_num_samples = min(T, self.num_samples) 
+        sample_indices = np.linspace(0, T - 1, num=actual_num_samples, dtype=int)
         frame_angles = {}
         
         for out_idx, f_idx in enumerate(sample_indices):

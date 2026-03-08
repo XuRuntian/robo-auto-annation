@@ -10,11 +10,12 @@ class GAPSegmentor:
     基于 Pelt 和 LSTM 的动作轨迹切分器。
     自动适应单臂或双臂数据。
     """
-    def __init__(self, penalty_value=1.5, threshold=0.4, min_gap=25, min_duration=5, device="cuda"):
+    def __init__(self, penalty_value=1.5, threshold=0.4, min_gap=25, min_duration=5, adaptive=True, device="cuda"):
         self.penalty_value = penalty_value
         self.threshold = threshold
         self.min_gap = min_gap
         self.min_duration = min_duration
+        self.adaptive = adaptive
         self.device = device if torch.cuda.is_available() else "cpu"
 
     def detect_phases(self, arm_states: dict[str, ArmState], epochs=500):
@@ -31,13 +32,18 @@ class GAPSegmentor:
         all_breakpoints = set()
 
         for arm_name, state in arm_states.items():
-            # 拼接 3+3+2 维特征
             feature = np.concatenate([state.pos, state.rot, state.gripper], axis=-1)
             arm_features.append(feature)
             
-            # 单臂 Pelt 检测
+            # 【自适应 penalty_value】
+            # 计算特征方差，结合序列长度 T 动态设定 penalty
+            if self.adaptive:
+                variance = np.var(feature)
+                current_penalty = np.log(T) * variance * 0.13 
+            else:
+                current_penalty = self.penalty_value
             algo = rpt.Pelt(custom_cost=CostDirection(), min_size=10).fit(feature)
-            bp = algo.predict(pen=self.penalty_value)
+            bp = algo.predict(pen=current_penalty) 
             all_breakpoints.update(bp)
 
         combined_breakpoints = sorted(list(all_breakpoints))
@@ -84,7 +90,11 @@ class GAPSegmentor:
 
         window_size = 5
         smoothed_logits = np.convolve(logits, np.ones(window_size)/window_size, mode='same')
-        phase_frames = np.where(smoothed_logits > self.threshold)[0]
+        if self.adaptive:
+            threshold = np.mean(smoothed_logits) + 0.5 * np.std(smoothed_logits)
+        else:
+            threshold = self.threshold
+        phase_frames = np.where(smoothed_logits > threshold)[0]
         
         if len(phase_frames) == 0:
             return [] # 未检测到变点
@@ -100,17 +110,33 @@ class GAPSegmentor:
         raw_phases.append((current_phase[0], current_phase[-1]))
 
         # 合并近距离段落并过滤短毛刺
+        if len(raw_phases) > 0 and self.adaptive:
+            phase_lengths = [p[1] - p[0] for p in raw_phases]
+            gap_lengths = [raw_phases[i][0] - raw_phases[i-1][1] for i in range(1, len(raw_phases))]
+            
+            # 动态设定 min_duration: 取所有检测片段长度的 10% 分位数，或者配置底线
+            min_duration = max(15, int(np.percentile(phase_lengths, 10))) if phase_lengths else self.min_duration
+            
+            # 动态设定 min_gap: 如果平均动作很紧凑，gap 也应该小
+            min_gap = max(10, int(np.mean(gap_lengths) * 0.3)) if gap_lengths else self.min_gap
+        else:
+            min_duration = self.min_duration
+            min_gap = self.min_gap
+
+        # 使用动态参数合并和过滤
         merged_phases = []
         for p in raw_phases:
             if not merged_phases:
                 merged_phases.append(p)
             else:
                 last_p = merged_phases[-1]
-                if p[0] - last_p[1] <= self.min_gap:
+                if p[0] - last_p[1] <= min_gap:
                     merged_phases[-1] = (last_p[0], p[1])
                 else:
                     merged_phases.append(p)
                     
-        final_phases = [p for p in merged_phases if (p[1] - p[0]) >= self.min_duration]
-        
+        final_phases = [p for p in merged_phases if (p[1] - p[0]) >= min_duration]
+        if final_phases is None:
+                print("⚠️ [警告] 物理切分返回了 None，将当作未检测到变点处理。")
+                final_phases = []
         return final_phases
