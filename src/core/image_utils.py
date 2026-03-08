@@ -153,5 +153,7 @@ class GridImageGenerator:
                 full_mega_grid = cv2.resize(full_mega_grid, (0,0), fx=scale, fy=scale)
             
             Image.fromarray(full_mega_grid).save(output_path, quality=80)
+            print(f"✅ 成功生成大图: {output_path}")
             return True
+        print("❌ 警告: 没有成功生成任何九宫格，无法创建大图。")
         return False
