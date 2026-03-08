@@ -48,32 +48,39 @@ class KinematicCalculator:
     def compute(self, arm_states: dict[str, ArmState]):
         """
         主接口：接收提取出的手臂状态字典，返回 VLM 所需的 JSON。
-        :param arm_states: {"right": ArmState, "left": ArmState} 或单臂字典
         """
-        # 1. 验证数据长度（取第一个可用手臂的长度）
+        # 1. 验证数据长度
+        if not arm_states:
+            return {}, np.array([0] * self.num_samples)
+        
         first_arm = next(iter(arm_states.values()))
         T = len(first_arm.pos)
         if T < 2:
             return {}, np.array([0] * self.num_samples)
 
-        # 2. 遍历计算每只手臂的物理特征
+        # 2. 计算每只手臂的物理特征（保留原始数据，不求全局平均）
+        kinematic_json = {}
         all_metrics = {}
+        
         for name, state in arm_states.items():
-            all_metrics[name] = self._compute_arm_metrics(state)
+            metrics = self._compute_arm_metrics(state)
+            all_metrics[name] = metrics
+            
+            # 将统计值按手臂名称（left/right）存入 JSON
+            kinematic_json[name] = {
+                'vel': round(float(np.mean(metrics["vel"])), 2),
+                'angle': round(float(np.mean(metrics["ang_vel"])), 2),
+                'vel_score': round(float(metrics["v_score"]), 2),
+                'angle_score': round(float(metrics["a_score"]), 2),
+                'vel_fft': np.round(metrics["v_fft"], 3).tolist(),
+                'angle_fft': np.round(metrics["a_fft"], 3).tolist(),
+            }
 
-        # 3. 全局统计值聚合（支持单双臂平滑切换）
-        # 如果是双臂，则取平均值（对应原逻辑的 CM）；如果是单臂，则直接使用该臂数值
-        avg_vel = np.mean([m["vel"] for m in all_metrics.values()], axis=0)
-        avg_ang = np.mean([m["ang_vel"] for m in all_metrics.values()], axis=0)
-        avg_v_score = np.mean([m["v_score"] for m in all_metrics.values()])
-        avg_a_score = np.mean([m["a_score"] for m in all_metrics.values()])
-
-        # 4. 关键帧抽样
+        # 3. 关键帧抽样 (frame_angles 逻辑保持不变，因为它已经区分了 r_ 和 l_ 前缀)
         sample_indices = np.linspace(0, T - 1, num=self.num_samples, dtype=int)
         frame_angles = {}
         
         for out_idx, f_idx in enumerate(sample_indices):
-            # 动态组装当前帧中所有可用手臂的姿态
             current_frame_data = {}
             for name, state in arm_states.items():
                 prefix = 'r' if name == "right" else 'l'
@@ -83,21 +90,8 @@ class KinematicCalculator:
                     f'{prefix}_arm_rz': round(float(state.rot[f_idx, 2]), 2),
                     f'{prefix}_gripper': round(float(state.gripper[f_idx, 0]), 2),
                 })
-            frame_angles[str(out_idx)] = [current_frame_data]
+            frame_angles[str(out_idx)] = current_frame_data
 
-        # 5. 生成最终 JSON
-        # 聚合后的 FFT 列表也可以取平均
-        v_fft_avg = np.mean([m["v_fft"] for m in all_metrics.values()], axis=0).round(3).tolist()
-        a_fft_avg = np.mean([m["a_fft"] for m in all_metrics.values()], axis=0).round(3).tolist()
-
-        kinematic_json = {
-            'vel': round(float(np.mean(avg_vel)), 2),
-            'angle': round(float(np.mean(avg_ang)), 2),
-            'vel_score': round(float(avg_v_score), 2),
-            'angle_score': round(float(avg_a_score), 2),
-            'frame_angles': frame_angles,
-            'vel-fft': v_fft_avg,
-            'angle_fft': a_fft_avg
-        }
-        
+        # 4. 装载抽样后的姿态序列
+        kinematic_json['frame_angles'] = frame_angles
         return kinematic_json, sample_indices

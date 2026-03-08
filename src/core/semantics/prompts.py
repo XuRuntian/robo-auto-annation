@@ -3,14 +3,27 @@ import re
 
 def build_robotics_pamor_prompt(kinematic_json, task_description, task_history):
     kinematics_str = json.dumps(kinematic_json, ensure_ascii=False)
-    
+    active_arms = [k for k in kinematic_json.keys() if k != 'frame_angles']
+    arm_names_str = " and ".join([f"'{arm}'" for arm in active_arms])
+    json_format_example = {
+        "arm_name": {"vel": "...", "angle": "...", "vel_score": "..."},
+        "frame_angles": {"frame_idx": {"r_arm_rx": "...", "l_arm_rx": "..."}}
+    }
+    json_example_str = json.dumps(json_format_example)
     prompt = f"""You are an expert in describing robotic motion content for embodied AI. I will give you 32 frames of "video frames" uniformly extracted from a robot manipulation trajectory, input them in chronological order, and provide you with kinematic posture information corresponding to this sequence.
     Please analyze the visual content based on the video frames and posture information, and output the motion description of the robot in the video.
 
     TASK GOAL OF THIS EPISODE: {task_description}
     TASK HISTORY: {task_history}
-    The format of the kinematic information is as follows: "{{\"vel\": overall_velocity, \"angle\": overall_angular_velocity, \"vel_score\": ..., \"frame_angles\": {{\"frame_idx\": [{{\"joint_name\": joint_angle}}]}}}}".
-    The posture information analyzes motion from the perspectives of end-effector translation and joint rotation. 'vel' corresponds to the movement rate of the end-effectors, while 'angle' and Euler angles ('rx', 'ry', 'rz') represent the rotational transformation of the arms. You need to pay special attention to the Euler angles for orientation changes (like pouring) and the 'gripper' value for grasping actions.
+    The format of the kinematic information is as follows: The format of the kinematic information is as follows: 
+    The provided data contains information for {len(active_arms)} arm(s): {arm_names_str}.
+    The format follows this structure: {json_example_str}
+
+    The posture information analyzes motion for the right and left arms independently. 
+    'vel' and 'angle' represent the movement intensity of each arm. 
+    In 'frame_angles', 'r_' prefixes denote the right arm/gripper and 'l_' prefixes denote the left. 
+    Euler angles ('rx', 'ry', 'rz') represent rotational transformations, and 'gripper' values (0 to 1) indicate grasping status. 
+    Use the per-arm 'vel' and 'vel_score' to distinguish which arm is active versus holding still.
 
     The specific description rules are as follows:
     1. Please accurately identify all the subjects (e.g., right arm, left arm, right gripper) and objects/backgrounds in the video, and refer to them with specific words.

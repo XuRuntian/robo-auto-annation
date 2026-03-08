@@ -141,6 +141,7 @@ class RoboAnnotationPipeline:
             
             # 构造 Prompt 并请求大模型
             prompt = build_robotics_pamor_prompt(kinematic_json, task_description, task_history)
+            print(prompt)
             try:
                 semantic_label = self.vlm.generate(prompt=prompt, images=pil_images)
                 print(f"\n   🎯 [Chunk {idx+1}/{len(action_chunks)}] VLM 输出:\n   {semantic_label}")
