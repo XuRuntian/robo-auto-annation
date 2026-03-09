@@ -10,8 +10,8 @@ def main():
     pipeline = RoboAnnotationPipeline(config=config)
     
     # 3. 传入数据集和人类指令，一键启动
-    data_path = "/home/user/test_data/lerobot/Agilex_Cobot_Magic_pour_water_into_cup_0_qced_hardlink"
-    task_desc = "Pour water or beverage into the cup using right hand and take back  arm."
+    data_path = "/home/xuruntian/下载/AIRBOT_MMK2_mobile_phone_storage"
+    task_desc = "Place the phone on the box and then remove the phone."
     
     pipeline.process_episode(data_path, task_desc)
 

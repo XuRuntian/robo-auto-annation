@@ -49,7 +49,7 @@ def build_subtask_summary_prompt(task_description, wsm_trajectory, kpm_annotatio
     ```
     """
     return prompt
-def build_robotics_pamor_prompt(kinematic_json, task_description, world_state_dict):
+def build_robotics_pamor_prompt(kinematic_json, task_description, world_state_dict, num_actual):
     """
     注意：这里的 task_history 参数被替换为了 world_state_dict (即当前的世界状态机图)
     """
@@ -82,7 +82,7 @@ def build_robotics_pamor_prompt(kinematic_json, task_description, world_state_di
     }
     ```
     """
-    prompt = f"""You are an expert in describing robotic motion content for embodied AI. I will give you 32 frames of "video frames" uniformly extracted from a robot manipulation trajectory, input them in chronological order, and provide you with kinematic posture information corresponding to this sequence.
+    prompt = f"""You are an expert in describing robotic motion content for embodied AI. I will give you {num_actual} frames of "video frames" uniformly extracted from a robot manipulation trajectory, input them in chronological order, and provide you with kinematic posture information corresponding to this sequence.
     Please analyze the visual content based on the video frames and posture information, and output the motion description of the robot in the video.
 
     TASK GOAL OF THIS EPISODE: {task_description}
@@ -100,7 +100,7 @@ def build_robotics_pamor_prompt(kinematic_json, task_description, world_state_di
     The specific description rules are as follows:
     1. Please accurately identify all the subjects (e.g., right arm, left arm, right gripper) and objects/backgrounds in the video, and refer to them with specific words.
     2. The description of the robot's action needs to be fine-grained. Use precise robotic manipulation verbs (e.g., reach, grasp, retract, rotate, pour, hold) and reflect the intensity and direction of the action.
-    3. Then output "[{{0, 31}}]" at the beginning of the first line, which means that this sequence description starts from the 0th frame and ends at the 31st frame.
+    3. Then output "[{{0, {num_actual-1}}}]" at the beginning of the first line, which means that this sequence description starts from the 0th frame and ends at the 31st frame.
     4. We stipulate that movement is divided into robot-level (movement of the overall robot base/torso, if any), arm-level (movement of the main robotic arms in 3D space), and gripper-level (movement of the end-effectors/grippers, such as opening, closing, or holding). Please output "robot-level" in the second line, then output all robot-level information, output "arm-level" in a new line, output all arm-level information, and then output "gripper-level" in a new line, and output all gripper-level information.
     5. Output all the moving subjects you can observe by line, using the format we call motion-unit, which is "[{{begin_frame, end_frame}}, (motion_subject, motion, motion_object, motion_adverbial, motion_amplitude), (motion_subject, modifiers_subject), (motion_object, modifiers_object)]", where the first unit indicates the start and end frame of the motion. The second unit represents the subject of the action, the action description, the receptor of the action, the adverbial of the action, and the amplitude of the action. The third unit represents the modifier of the subject, and the fourth unit represents the modifier of the receptor. Each action is output in one line.
     6. For the description of direction, please use the camera-centered or robot-centered perspective (e.g., "toward the cup", "downward").
@@ -114,8 +114,8 @@ def build_robotics_pamor_prompt(kinematic_json, task_description, world_state_di
     - motion_amplitude: the speed or intensity (e.g., slow, moderate, steady, fast)
     - modifiers_subject: feature description of the robot part (e.g., right manipulator)
     - modifiers_object: feature description of the object (e.g., red cup, clear bottle, none)
-    10. All kinematic values in the posture information correspond to specific fine-grained motions. Combined with the posture information and the video frame content, accurately define the start and end frames of each motion unit. Pay special attention to sudden jumps in Euler angles (which often indicate actions like pouring/flipping) and stabilize the boundaries.
-    11. CRITICAL NEW RULE: Before outputting the line-by-line motion-units, you MUST act as a State Tracker. You must output a JSON block summarizing the new macroscopic World State Graph at the END of these 32 frames. Use the `environment_topology_state` array to act as a scene graph. Here is the template you must strictly follow:
+    10. All kinematic values in the posture information correspond to specific fine-grained motions. Combined with the posture information and the video frame content, accurately define the start and end frames of each motion unit. Pay special attention to sudden jumps in Euler angles (which often indicate actions like pouring/flipping) and stabilize the boundaries within the provided {num_actual} frames..
+    11. CRITICAL NEW RULE: Before outputting the line-by-line motion-units, you MUST act as a State Tracker. You must output a JSON block summarizing the new macroscopic World State Graph at the END of these {num_actual} frames (specifically at frame {num_actual - 1}).. Use the `environment_topology_state` array to act as a scene graph. Here is the template you must strictly follow:
     {wsm_template}
     The kinematic posture information provided is as follows:
     {kinematics_str}

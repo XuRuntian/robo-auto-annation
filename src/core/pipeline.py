@@ -128,7 +128,7 @@ class RoboAnnotationPipeline:
             kinematic_json, local_indices = self.calculator.compute(chunk_states)
             global_sample_indices = chunk_start + local_indices
             
-            # 提取 32 帧视觉图像
+            # 提取视觉图像
             pil_images = []
             for frame_idx in global_sample_indices:
                 frame_data = reader.get_frame(int(frame_idx))
@@ -147,9 +147,9 @@ class RoboAnnotationPipeline:
                     pass
             
             if not pil_images: continue
-            
+            num_actual = len(pil_images)
             # 构造 Prompt 并请求大模型
-            prompt = build_robotics_pamor_prompt(kinematic_json, task_description, world_state_dict=current_wsm)
+            prompt = build_robotics_pamor_prompt(kinematic_json, task_description, world_state_dict=current_wsm, num_actual=num_actual)
             try:
                 semantic_label = self.vlm.generate(prompt=prompt, images=pil_images)
                 # 动态更新历史因果
