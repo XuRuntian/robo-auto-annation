@@ -1,6 +1,6 @@
 import numpy as np
 from src.core.types import ArmState
-
+from .sampler import DynamicKeyframeSampler
 class KinematicCalculator:
     """
     负责计算动作块（Chunk）的运动学特征。
@@ -10,7 +10,7 @@ class KinematicCalculator:
         self.fps = fps
         self.dt = 1.0 / fps
         self.num_samples = num_samples
-
+        self.sampler = DynamicKeyframeSampler(num_samples=num_samples)
     def _compute_arm_metrics(self, state: ArmState):
         """原子计算：计算单只手臂的速度和频域特征"""
         T = len(state.pos)
@@ -77,8 +77,9 @@ class KinematicCalculator:
             }
 
         # 3. 关键帧抽样 (frame_angles 逻辑保持不变，因为它已经区分了 r_ 和 l_ 前缀)
-        actual_num_samples = min(T, self.num_samples) 
-        sample_indices = np.linspace(0, T - 1, num=actual_num_samples, dtype=int)
+        # actual_num_samples = min(T, self.num_samples) 
+        sample_indices = self.sampler.sample(arm_states, all_metrics)
+
         frame_angles = {}
         
         for out_idx, f_idx in enumerate(sample_indices):
