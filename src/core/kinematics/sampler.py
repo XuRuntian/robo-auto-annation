@@ -34,13 +34,7 @@ class DynamicKeyframeSampler:
             # 补齐首帧，维持长度为T
             gripper_diff = np.vstack([np.zeros((1, state.gripper.shape[1])), gripper_diff])
             gripper_change = np.sum(gripper_diff, axis=1)
-        # --- 增强版 DEBUG 打印 ---
-            max_val = np.max(gripper_change)
-            max_idx = np.argmax(gripper_change) # 获取最大变化发生的帧索引
-            
-            print(f"--- [DEBUG] 手臂: {name} ---")
-            print(f"最大夹爪变化量: {max_val:.6f} (发生在第 {max_idx} 帧)")
-            print(f"该帧前后的夹爪数据: {state.gripper[max(0, max_idx-1) : max_idx+2].flatten()}")
+
             # 归一化并放大权重
             if np.max(gripper_change) > 1e-5:
                 norm_gripper = gripper_change / np.max(gripper_change)

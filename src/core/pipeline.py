@@ -174,7 +174,7 @@ class RoboAnnotationPipeline:
         if global_dataset_annotations:
             with open(output_path, 'w', encoding='utf-8') as f:
                 json.dump(global_dataset_annotations, f, indent=4, ensure_ascii=False)
-            print(f"\n🎉 完美！高质量结构化动作标签已保存至:\n{output_path}")
+            print(f"\n🎉 结构化动作标签已保存至:\n{output_path}")
         else:
             print("\n⚠️ 警告：未生成任何有效标注。")
             
@@ -182,7 +182,7 @@ class RoboAnnotationPipeline:
         if wsm_trajectory:
             with open(output_wsm_path, 'w', encoding='utf-8') as f:
                 json.dump(wsm_trajectory, f, indent=4, ensure_ascii=False)
-            print(f"🎉 完美！宏观世界状态机(WSM)轨迹已保存至:\n{output_wsm_path}")
+            print(f"🎉 宏观世界状态机(WSM)轨迹已保存至:\n{output_wsm_path}")
 
         # ==========================================
         # 阶段 5：高级子任务标签生成 (Subtask Segmentation)
@@ -190,7 +190,7 @@ class RoboAnnotationPipeline:
         print("\n📝 [Pipeline] 开始生成人类可读的子任务指令...")
         
         # 2. 调用纯文本大模型进行翻译
-        total_frames = 801  
+        total_frames = traj_len  
         video_id = "video_001"
         subtask_prompt = build_subtask_summary_prompt(
             task_description=task_description,
@@ -202,7 +202,6 @@ class RoboAnnotationPipeline:
         try:
             # 注意：这里你可以直接调用纯文本接口 (比如 gpt-4o-mini)，速度飞快且极度便宜
             subtask_response = self.vlm.generate(prompt=subtask_prompt, images=[]) # 传空列表不传图
-            print(f"\n🖼️ [Subtask Generation] 大模型生成的原始响应:{subtask_response}")
             # 正则提取最终 JSON
             json_match = re.search(r'```json\s*(.*?)\s*```', subtask_response, re.DOTALL | re.IGNORECASE)
             if json_match:
@@ -212,7 +211,7 @@ class RoboAnnotationPipeline:
                 output_subtask_path = os.path.join(os.path.dirname(data_path), "subtask_instructions.json")
                 with open(output_subtask_path, 'w', encoding='utf-8') as f:
                     json.dump(subtask_json, f, indent=4, ensure_ascii=False)
-                print(f"🎉 完美！人类可读的高级子任务标签已保存至:\n{output_subtask_path}")
+                print(f"🎉 子任务标签已保存至:\n{output_subtask_path}")
             else:
                 print("⚠️ 无法解析子任务 JSON。")
                 
