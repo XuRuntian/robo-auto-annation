@@ -46,7 +46,7 @@ class QwenVLCaller:
         Args:
             model_name: 使用的模型名称，默认为 "qwen-vl-max"
             temperature: 生成文本的温度参数，默认为 0.1
-            max_tokens: 最大生成 token 数量，默认为 1024
+            max_tokens: 最大生成 token 数量，默认为 4096
             timeout: 请求超时时间，默认为 120.0 秒
             base_url: API 基础 URL，默认为阿里云百炼兼容版URL
             api_key: API 访问密钥，默认从环境变量获取
@@ -76,7 +76,8 @@ class QwenVLCaller:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout = timeout
-
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
     def _encode_pil_image_to_base64(self, image: Image.Image, max_size: int = 1024) -> str:
         """
         将 PIL 图像编码为 base64 格式
@@ -202,7 +203,12 @@ class QwenVLCaller:
                 temperature=self.temperature,
                 max_tokens=self.max_tokens
             )
-            
+            if hasattr(response, 'usage') and response.usage:
+                self.total_prompt_tokens += response.usage.prompt_tokens
+                self.total_completion_tokens += response.usage.completion_tokens
+                # 你也可以在这里加个 logger 打印单次消耗
+                logger.info(f"单次请求消耗: Prompt {response.usage.prompt_tokens}, Completion {response.usage.completion_tokens}")
+
             # 检查响应有效性
             if not response.choices or len(response.choices) == 0:
                 logger.warning("VLM returned an empty choice list.")
@@ -214,3 +220,23 @@ class QwenVLCaller:
         except Exception as e:
             logger.error(f"VLM API request failed: {e}")
             raise  # 或者返回空字符串，取决于你的重试策略
+
+    def get_cost_report(self):
+            """
+            返回累计的 token 和估算费用。
+            注意：这里的价格是按 qwen-vl-max 目前大概的单价估算的（例如：输入 0.02元/千token，输出 0.02元/千token）
+            具体费率可以根据阿里云百炼最新的计费文档调整。
+            """
+            # 假设单价 (RMB / 1000 tokens)
+            price_per_1k_prompt = 0.003
+            price_per_1k_completion = 0.009
+            
+            cost = (self.total_prompt_tokens / 1000.0) * price_per_1k_prompt + \
+                (self.total_completion_tokens / 1000.0) * price_per_1k_completion
+                
+            return {
+                "prompt_tokens": self.total_prompt_tokens,
+                "completion_tokens": self.total_completion_tokens,
+                "total_tokens": self.total_prompt_tokens + self.total_completion_tokens,
+                "estimated_cost_rmb": round(cost, 4)
+            }

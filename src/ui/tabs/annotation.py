@@ -37,12 +37,20 @@ def render_annotation_tab():
                 st.write("🧠 正在进行物理切分与 VLM 语义标注 (这可能需要一些时间)...")
                 pipeline.process_episode(data_path, task_desc)
                 
-                # 更新 Session State
+                cost_report = pipeline.vlm.get_cost_report()
+                
                 st.session_state.data_path = data_path
                 st.session_state.data_loaded = True
                 
-                status.update(label="🎉 自动化标注完成！请切换到【标注结果可视化】Tab 查看。", state="complete", expanded=False)
-                st.rerun() # 刷新页面，让另一个 Tab 感知到状态变化
+                status.update(label="🎉 自动化标注完成！", state="complete", expanded=False)
+                
+                # 用 st.metric 画三个漂亮的数据指标卡片
+                st.divider()
+                st.markdown("### 💰 本次标注消费账单")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("图像+提示词 Tokens (输入)", f"{cost_report['prompt_tokens']:,}")
+                col2.metric("生成文本 Tokens (输出)", f"{cost_report['completion_tokens']:,}")
+                col3.metric("预估花费 (RMB)", f"¥ {cost_report['estimated_cost_rmb']:.4f}")
 
             except Exception as e:
                 status.update(label=f"❌ 流水线崩溃: {str(e)}", state="error")
