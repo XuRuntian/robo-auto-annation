@@ -27,7 +27,10 @@ def build_subtask_summary_prompt(task_description, wsm_trajectory, kpm_annotatio
        - **Action**: Use a precise verb from KPM (e.g., "Tilt" instead of "Move").
        - **Object**: Use specific modifiers from KPM (e.g., "clear plastic bottle with red label").
        - **Causality**: The instruction must reflect the *intent*. (e.g., if the state changes to "partially filled", the instruction should be "Pour the liquid into the cup").
-    3. **Merge Policy**: If consecutive WSM chunks have the same `macro_skill_id` and the KPM shows continuous motion toward the same goal, merge them into one meaningful subtask.
+    3. Merge & Isolation Policy:
+    - DO NOT merge 'Reach' (arm moving towards object) with 'Grasp/Release' (gripper closing/opening). They MUST be separate segments.
+    - Any change in the gripper state (e.g., from open to closed) indicates a critical interaction and must form its own distinct segment, no matter how short.
+    - You may only merge consecutive arm movements if the gripper state remains completely unchanged.
 
     ### 4. Output Format
     Return ONLY a JSON object:
@@ -87,7 +90,7 @@ def build_robotics_pamor_prompt(kinematic_json, task_description, world_state_di
 
     TASK GOAL OF THIS EPISODE: {task_description}
     WORLD STATE: {state_str}
-    The format of the kinematic information is as follows: The format of the kinematic information is as follows: 
+    The format of the kinematic information is as follows: 
     The provided data contains information for {len(active_arms)} arm(s): {arm_names_str}.
     The format follows this structure: {json_example_str}
 
@@ -100,23 +103,34 @@ def build_robotics_pamor_prompt(kinematic_json, task_description, world_state_di
     The specific description rules are as follows:
     1. Please accurately identify all the subjects (e.g., right arm, left arm, right gripper) and objects/backgrounds in the video, and refer to them with specific words.
     2. The description of the robot's action needs to be fine-grained. Use precise robotic manipulation verbs (e.g., reach, grasp, retract, rotate, pour, hold) and reflect the intensity and direction of the action.
-    3. Then output "[{{0, {num_actual-1}}}]" at the beginning of the first line, which means that this sequence description starts from the 0th frame and ends at the 31st frame.
+    3. Then output "[{{0, {num_actual-1}}}]" at the beginning of the first line, which means that this sequence description starts from the 0th frame and ends at the {num_actual-1} frame.
     4. We stipulate that movement is divided into robot-level (movement of the overall robot base/torso, if any), arm-level (movement of the main robotic arms in 3D space), and gripper-level (movement of the end-effectors/grippers, such as opening, closing, or holding). Please output "robot-level" in the second line, then output all robot-level information, output "arm-level" in a new line, output all arm-level information, and then output "gripper-level" in a new line, and output all gripper-level information.
-    5. Output all the moving subjects you can observe by line, using the format we call motion-unit, which is "[{{begin_frame, end_frame}}, (motion_subject, motion, motion_object, motion_adverbial, motion_amplitude), (motion_subject, modifiers_subject), (motion_object, modifiers_object)]", where the first unit indicates the start and end frame of the motion. The second unit represents the subject of the action, the action description, the receptor of the action, the adverbial of the action, and the amplitude of the action. The third unit represents the modifier of the subject, and the fourth unit represents the modifier of the receptor. Each action is output in one line.
+    5. Output all the moving subjects you can observe by line, using the format we call motion-unit, which is "[{{begin_frame, end_frame}}, (motion_subject, motion, motion_object, motion_adverbial, motion_amplitude), (motion_subject, modifiers_subject), (motion_object, modifiers_object)]".
     6. For the description of direction, please use the camera-centered or robot-centered perspective (e.g., "toward the cup", "downward").
     7. If a robotic arm or gripper remains motionless in the video, please use the same format to describe its state (e.g., holding still).
     8. Please use English to answer, no need to worry about the length limit.
     9. This is an explanation of each specific element in motion-unit:
-    - motion_subject: the agent of motion (e.g., right_arm, left_gripper)
-    - motion_object: the object being manipulated (e.g., cup, water_pitcher, none)
-    - motion: the specific manipulation verb (e.g., rotate, pour, move)
-    - motion_adverbial: the direction or spatial relation (e.g., downward, towards the table)
-    - motion_amplitude: the speed or intensity (e.g., slow, moderate, steady, fast)
-    - modifiers_subject: feature description of the robot part (e.g., right manipulator)
-    - modifiers_object: feature description of the object (e.g., red cup, clear bottle, none)
-    10. All kinematic values in the posture information correspond to specific fine-grained motions. Combined with the posture information and the video frame content, accurately define the start and end frames of each motion unit. Pay special attention to sudden jumps in Euler angles (which often indicate actions like pouring/flipping) and stabilize the boundaries within the provided {num_actual} frames..
-    11. CRITICAL NEW RULE: Before outputting the line-by-line motion-units, you MUST act as a State Tracker. You must output a JSON block summarizing the new macroscopic World State Graph at the END of these {num_actual} frames (specifically at frame {num_actual - 1}).. Use the `environment_topology_state` array to act as a scene graph. Here is the template you must strictly follow:
-    {wsm_template}
+        - motion_subject: the agent of motion (e.g., right_arm, left_gripper)
+        - motion_object: the object being manipulated (e.g., cup, water_pitcher, none)
+        - motion: the specific manipulation verb (e.g., rotate, pour, move)
+        - motion_adverbial: the direction or spatial relation (e.g., downward, towards the table)
+        - motion_amplitude: the speed or intensity (e.g., slow, moderate, steady, fast)
+        - modifiers_subject: feature description of the robot part (e.g., right manipulator)
+        - modifiers_object: feature description of the object (e.g., red cup, clear bottle, none)
+
+    10. CRITICAL KINEMATIC ALIGNMENT: You MUST strictly align your motion-units with the 'gripper' values in 'frame_angles'. 
+        - A 'gripper' value near 1.0 means open; near 0.0 means closed.
+        - If you observe a sudden jump in the 'gripper' value (e.g., dropping from ~0.9 to ~0.4, or rising), this is a HARD BOUNDARY. 
+        - You MUST NOT merge a 'reach' or 'move' action with a 'grasp' or 'release'. 
+        - Isolate the exact frame where the gripper value changes into a short, dedicated motion-unit (e.g., "[{{52, 54}}, (right_gripper, grasp, orange, ...)]").
+
+    11. STATE TRACKER ANTI-LAZINESS RULE: Before outputting the line-by-line motion-units, you MUST act as a State Tracker and output a JSON block summarizing the World State Graph at the END of these {num_actual} frames (frame {num_actual-1}). 
+        - You must actively update the `macro_skill_id` and `object_physical_state`.
+        - The task involves multiple DIFFERENT objects (orange, paper ball, bottle, knife, etc.). 
+        - When the robot's end_effector targets a NEW object, you MUST change the `macro_skill_id` (e.g., from 'manipulate_fruit' to 'dispose_paper_ball'). Do not copy the previous state blindly.
+        - Follow this template strictly:
+        {wsm_template}
+
     The kinematic posture information provided is as follows:
     {kinematics_str}
 

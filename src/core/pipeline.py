@@ -199,11 +199,10 @@ class RoboAnnotationPipeline:
             total_frames=total_frames,
             video_id=video_id
         )
-        
         try:
             # 注意：这里你可以直接调用纯文本接口 (比如 gpt-4o-mini)，速度飞快且极度便宜
             subtask_response = self.vlm.generate(prompt=subtask_prompt, images=[]) # 传空列表不传图
-            
+            print(f"\n🖼️ [Subtask Generation] 大模型生成的原始响应:{subtask_response}")
             # 正则提取最终 JSON
             json_match = re.search(r'```json\s*(.*?)\s*```', subtask_response, re.DOTALL | re.IGNORECASE)
             if json_match:

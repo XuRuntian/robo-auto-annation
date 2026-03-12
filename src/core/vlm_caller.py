@@ -35,7 +35,7 @@ class QwenVLCaller:
         self,
         model_name: str = "qwen-vl-max",
         temperature: float = 0.1,
-        max_tokens: int = 1024,
+        max_tokens: int = 4096,
         timeout: float = 120.0,
         base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
         api_key: Optional[str] = None

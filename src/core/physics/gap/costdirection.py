@@ -82,7 +82,7 @@ class CostDirection(BaseCost):
                 gripper_distance = 1.0
             
             # 同样加上你之前修复的 1.0 * rotate_distance
-            return move_distance + 1.0 * rotate_distance - 5 * np.exp(-3) * gripper_distance
+            return move_distance + 1.0 * rotate_distance - 10 * np.exp(-3) * gripper_distance
         
         total_direction = delta_vector(self.signal[start-1], self.signal[end-1])
 

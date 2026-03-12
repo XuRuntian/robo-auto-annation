@@ -10,8 +10,8 @@ def main():
     pipeline = RoboAnnotationPipeline(config=config)
     
     # 3. 传入数据集和人类指令，一键启动
-    data_path = "/home/xuruntian/下载/AIRBOT_MMK2_mobile_phone_storage"
-    task_desc = "Place the phone on the box and then remove the phone."
+    data_path = "/home/xuruntian/下载/RMC-AIDA-L_desktop_organization"
+    task_desc = "put the orange in the fruit plate, put the paper ball in the trash can, stand the bottle upright, put the art knife in the pen holder, put the glue in the pen holder, and put the eraser in the pen holder."
     
     pipeline.process_episode(data_path, task_desc)
 
