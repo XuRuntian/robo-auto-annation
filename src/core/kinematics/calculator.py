@@ -78,7 +78,7 @@ class KinematicCalculator:
 
         # 3. 关键帧抽样 (frame_angles 逻辑保持不变，因为它已经区分了 r_ 和 l_ 前缀)
         # actual_num_samples = min(T, self.num_samples) 
-        sample_indices = self.sampler.sample(arm_states, all_metrics)
+        sample_indices = self.sampler.sample(arm_states=arm_states, metrics_dict=all_metrics)
 
         frame_angles = {}
         

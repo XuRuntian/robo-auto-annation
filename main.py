@@ -1,19 +1,27 @@
-import yaml
-from src.core.pipeline import RoboAnnotationPipeline
+import streamlit as st
+from src.ui.tabs.annotation import render_annotation_tab
+from src.ui.tabs.visualization import render_visualization_tab
 
 def main():
-    # 1. 读取配置文件 (上一步我们约定的 yaml 格式)
-    with open("configs/robot_config.yaml", "r") as f:
-        config = yaml.safe_load(f)
-        
-    # 2. 实例化黑盒流水线
-    pipeline = RoboAnnotationPipeline(config=config)
-    
-    # 3. 传入数据集和人类指令，一键启动
-    data_path = "/home/xuruntian/下载/AIRBOT_MMK2_mobile_phone_storage"
-    task_desc = "Place the phone on the box and then remove the phone."
-    
-    pipeline.process_episode(data_path, task_desc)
+    st.set_page_config(page_title="Robo-ETL 具身智能工作台", layout="wide")
+    st.title("🤖 Robo-ETL 具身智能数据流水线")
+
+    # 1. 全局状态初始化
+    if 'data_path' not in st.session_state:
+        st.session_state.data_path = ""
+    if 'data_loaded' not in st.session_state:
+        st.session_state.data_loaded = False
+    if 'annotations' not in st.session_state:
+        st.session_state.annotations = []
+
+    # 2. 划分功能模块 (Tabs)
+    tab_pipeline, tab_visual = st.tabs(["🚀 自动化标注管线", "👁️ 标注结果可视化"])
+
+    with tab_pipeline:
+        render_annotation_tab()
+
+    with tab_visual:
+        render_visualization_tab()
 
 if __name__ == "__main__":
     main()

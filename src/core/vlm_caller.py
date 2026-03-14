@@ -14,6 +14,8 @@ from typing import List, Optional, Union, Dict, Any
 from PIL import Image
 from openai import OpenAI
 import httpx
+from pydantic import ValidationError
+from src.core.semantics.schema import PDDLTrajectory
 
 # 配置日志记录
 logger = logging.getLogger(__name__)
@@ -35,7 +37,7 @@ class QwenVLCaller:
         self,
         model_name: str = "qwen-vl-max",
         temperature: float = 0.1,
-        max_tokens: int = 1024,
+        max_tokens: int = 4096,
         timeout: float = 120.0,
         base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
         api_key: Optional[str] = None
@@ -46,7 +48,7 @@ class QwenVLCaller:
         Args:
             model_name: 使用的模型名称，默认为 "qwen-vl-max"
             temperature: 生成文本的温度参数，默认为 0.1
-            max_tokens: 最大生成 token 数量，默认为 1024
+            max_tokens: 最大生成 token 数量，默认为 4096
             timeout: 请求超时时间，默认为 120.0 秒
             base_url: API 基础 URL，默认为阿里云百炼兼容版URL
             api_key: API 访问密钥，默认从环境变量获取
@@ -76,7 +78,8 @@ class QwenVLCaller:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout = timeout
-
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
     def _encode_pil_image_to_base64(self, image: Image.Image, max_size: int = 1024) -> str:
         """
         将 PIL 图像编码为 base64 格式
@@ -202,7 +205,12 @@ class QwenVLCaller:
                 temperature=self.temperature,
                 max_tokens=self.max_tokens
             )
-            
+            if hasattr(response, 'usage') and response.usage:
+                self.total_prompt_tokens += response.usage.prompt_tokens
+                self.total_completion_tokens += response.usage.completion_tokens
+                # 你也可以在这里加个 logger 打印单次消耗
+                logger.info(f"单次请求消耗: Prompt {response.usage.prompt_tokens}, Completion {response.usage.completion_tokens}")
+
             # 检查响应有效性
             if not response.choices or len(response.choices) == 0:
                 logger.warning("VLM returned an empty choice list.")
@@ -214,3 +222,68 @@ class QwenVLCaller:
         except Exception as e:
             logger.error(f"VLM API request failed: {e}")
             raise  # 或者返回空字符串，取决于你的重试策略
+
+    def get_cost_report(self):
+            """
+            返回累计的 token 和估算费用。
+            注意：这里的价格是按 qwen-vl-max 目前大概的单价估算的（例如：输入 0.02元/千token，输出 0.02元/千token）
+            具体费率可以根据阿里云百炼最新的计费文档调整。
+            """
+            # 假设单价 (RMB / 1000 tokens)
+            price_per_1k_prompt = 0.003
+            price_per_1k_completion = 0.009
+            
+            cost = (self.total_prompt_tokens / 1000.0) * price_per_1k_prompt + \
+                (self.total_completion_tokens / 1000.0) * price_per_1k_completion
+                
+            return {
+                "prompt_tokens": self.total_prompt_tokens,
+                "completion_tokens": self.total_completion_tokens,
+                "total_tokens": self.total_prompt_tokens + self.total_completion_tokens,
+                "estimated_cost_rmb": round(cost, 4)
+            }
+    def generate_with_validation(
+        self,
+        prompt: str,
+        images: Optional[List[Image.Image]] = None,
+        system_prompt: Optional[str] = "You are a helpful and precise robotic expert.",
+        max_retries: int = 3
+    ) -> Optional[PDDLTrajectory]:
+        """
+        带 Pydantic 严格校验和闭环纠错的 VLM 生成机制
+        """
+        current_prompt = prompt
+        
+        for attempt in range(max_retries):
+            try:
+                # 1. 调用底层的 generate 获取文本
+                if attempt > 0:
+                    logger.warning(f"🔄 [闭环纠错] 正在进行第 {attempt + 1}/{max_retries} 次重试...")
+                
+                response_text = self.generate(current_prompt, images, system_prompt)
+                
+                # 2. 提取 JSON
+                json_data = self.extract_json(response_text)
+                
+                # 3. 🛡️ 核心：Pydantic 强制反序列化与逻辑校验
+                # 如果 VLM 幻觉编造了不存在的动作、违反了物理规律，这里会直接抛出 ValidationError
+                validated_trajectory = PDDLTrajectory(**json_data)
+                
+                return validated_trajectory  # 校验通过，完美返回！
+                
+            except ValueError as e:
+                # 捕获 JSON 解析失败 或 Pydantic 的校验失败
+                error_msg = str(e)
+                logger.error(f"❌ 校验失败: {error_msg}")
+                
+                # 构造 Feedback，打回重做 (参考 UniDomain 论文的方法)
+                feedback_prompt = (
+                    f"\n\n[System Feedback from your previous output]:\n"
+                    f"Your output failed validation with the following error(s):\n{error_msg}\n"
+                    f"Please correct your reasoning and ensure your output strictly follows the JSON schema and physical logic."
+                )
+                current_prompt += feedback_prompt
+                
+        # API 熔断：超过重试次数
+        logger.error("🛑 [Fallback] VLM 陷入死循环或顽固幻觉，达到最大重试次数。跳过当前 Chunk。")
+        return None

@@ -34,6 +34,7 @@ class DynamicKeyframeSampler:
             # 补齐首帧，维持长度为T
             gripper_diff = np.vstack([np.zeros((1, state.gripper.shape[1])), gripper_diff])
             gripper_change = np.sum(gripper_diff, axis=1)
+
             # 归一化并放大权重
             if np.max(gripper_change) > 1e-5:
                 norm_gripper = gripper_change / np.max(gripper_change)
