@@ -29,9 +29,9 @@ def build_subtask_summary_prompt(task_description, wsm_trajectory, kpm_annotatio
        - **Causality**: The instruction must reflect the *intent*. (e.g., if the state changes to "partially filled", the instruction should be "Pour the liquid into the cup").
     3. Merge & Isolation Policy:
     - DO NOT merge 'Reach' (arm moving towards object) with 'Grasp/Release' (gripper closing/opening). They MUST be separate segments.
-    - Any change in the gripper state (e.g., from open to closed) indicates a critical interaction and must form its own distinct segment, no matter how short.
-    - You may only merge consecutive arm movements if the gripper state remains completely unchanged.
-
+    - Any change in the gripper state (e.g., from open to closed) indicates a critical interaction and must form its own distinct segment.
+    - Post-Task Phase: If the verb is 'retract', 'place', or 'release' near the end of the video, describe it accurately as the robot returning to its rest position or concluding the task, NOT as "maintaining position".
+    - Post-Task Phase: If the physical motion action is 'idle' or 'retract' at the end of the trajectory, describe it simply as "The robot retracts the arm and concludes the task." DO NOT hallucinate reasons like "maintaining position".
     ### 4. Output Format
     Return ONLY a JSON object:
     ```json
@@ -52,114 +52,89 @@ def build_subtask_summary_prompt(task_description, wsm_trajectory, kpm_annotatio
     ```
     """
     return prompt
-def build_robotics_pamor_prompt(kinematic_json, task_description, world_state_dict, num_actual):
+def build_robotics_pamor_prompt(kinematic_json, task_description, world_state_dict, allowed_verbs, allowed_predicates):
     """
-    注意：这里的 task_history 参数被替换为了 world_state_dict (即当前的世界状态机图)
+    全新版本的 Prompt：强制 VLM 进行 PDDL 逻辑推导，不输出任何冗余文本和帧号
     """
+    import json
     kinematics_str = json.dumps(kinematic_json, ensure_ascii=False)
-    state_str = json.dumps(world_state_dict, indent=2) # 将状态机转为漂亮格式的字符串
+    state_str = json.dumps(world_state_dict, indent=2)
     
-    active_arms = [k for k in kinematic_json.keys() if k != 'frame_angles']
-    arm_names_str = " and ".join([f"'{arm}'" for arm in active_arms])
-    json_format_example = {
-        "arm_name": {"vel": "...", "angle": "...", "vel_score": "..."},
-        "frame_angles": {"frame_idx": {"r_arm_rx": "...", "l_arm_rx": "..."}}
-    }
-    json_example_str = json.dumps(json_format_example)
-    
-    # 将 JSON 模板提供给 VLM，让它知道需要输出什么格式
-    wsm_template = """
-    ```json
+    # 告诉 VLM 我们的 Schema 结构
+    schema_template = """
     {
-      "temporal_context": {"macro_skill_id": "...", "execution_phase": "..."},
-      "robot_interaction_state": {
-        "right_end_effector": {"contact_target": "...", "grasp_type": "...", "is_constrained": false},
-        "left_end_effector": {"contact_target": "...", "grasp_type": "...", "is_constrained": false}
-      },
-      "environment_topology_state": [
-        {"subject": "...", "relation": "...", "target": "..."} 
-      ],
-      "object_physical_state": [
-        {"object": "...", "property_changed": "...", "current_value": "..."}
+      "thought": "Analyze the physical kinematics and images here. E.g., The gripper velocity spikes, indicating a grasp...",
+      "operators": [
+        {
+          "action_verb": "grasp",
+          "subject": "right_arm",
+          "target_object": "apple",
+          "preconditions": [
+            {"predicate": "hand_free", "objects": ["right_arm"]},
+            {"predicate": "is_open", "objects": ["right_gripper"]}
+          ],
+          "effects": [
+            {"predicate": "holding", "objects": ["right_arm", "apple"]},
+            {"predicate": "is_closed", "objects": ["right_gripper"]}
+          ]
+        }
       ]
     }
-    ```
     """
-    prompt = f"""You are an expert in describing robotic motion content for embodied AI. I will give you {num_actual} frames of "video frames" uniformly extracted from a robot manipulation trajectory, input them in chronological order, and provide you with kinematic posture information corresponding to this sequence.
-    Please analyze the visual content based on the video frames and posture information, and output the motion description of the robot in the video.
 
-    TASK GOAL OF THIS EPISODE: {task_description}
-    WORLD STATE: {state_str}
-    The format of the kinematic information is as follows: 
-    The provided data contains information for {len(active_arms)} arm(s): {arm_names_str}.
-    The format follows this structure: {json_example_str}
+    prompt = f"""You are an Embodied AI planner and logical validator.
+    I will provide you with images of a robotic action chunk and its physical kinematics.
+    Your task is to act as a strict PDDL (Planning Domain Definition Language) compiler.
 
-    The posture information analyzes motion for the right and left arms independently. 
-    'vel' and 'angle' represent the movement intensity of each arm. 
-    In 'frame_angles', 'r_' prefixes denote the right arm/gripper and 'l_' prefixes denote the left. 
-    Euler angles ('rx', 'ry', 'rz') represent rotational transformations, and 'gripper' values (0 to 1) indicate grasping status. 
-    Use the per-arm 'vel' and 'vel_score' to distinguish which arm is active versus holding still.
-
-    The specific description rules are as follows:
-    1. Please accurately identify all the subjects (e.g., right arm, left arm, right gripper) and objects/backgrounds in the video, and refer to them with specific words.
-    2. The description of the robot's action needs to be fine-grained. Use precise robotic manipulation verbs (e.g., reach, grasp, retract, rotate, pour, hold) and reflect the intensity and direction of the action.
-    3. Then output "[{{0, {num_actual-1}}}]" at the beginning of the first line, which means that this sequence description starts from the 0th frame and ends at the {num_actual-1} frame.
-    4. We stipulate that movement is divided into robot-level (movement of the overall robot base/torso, if any), arm-level (movement of the main robotic arms in 3D space), and gripper-level (movement of the end-effectors/grippers, such as opening, closing, or holding). Please output "robot-level" in the second line, then output all robot-level information, output "arm-level" in a new line, output all arm-level information, and then output "gripper-level" in a new line, and output all gripper-level information.
-    5. Output all the moving subjects you can observe by line, using the format we call motion-unit, which is "[{{begin_frame, end_frame}}, (motion_subject, motion, motion_object, motion_adverbial, motion_amplitude), (motion_subject, modifiers_subject), (motion_object, modifiers_object)]".
-    6. For the description of direction, please use the camera-centered or robot-centered perspective (e.g., "toward the cup", "downward").
-    7. If a robotic arm or gripper remains motionless in the video, please use the same format to describe its state (e.g., holding still).
-    8. Please use English to answer, no need to worry about the length limit.
-    9. This is an explanation of each specific element in motion-unit:
-        - motion_subject: the agent of motion (e.g., right_arm, left_gripper)
-        - motion_object: the object being manipulated (e.g., cup, water_pitcher, none)
-        - motion: the specific manipulation verb (e.g., rotate, pour, move)
-        - motion_adverbial: the direction or spatial relation (e.g., downward, towards the table)
-        - motion_amplitude: the speed or intensity (e.g., slow, moderate, steady, fast)
-        - modifiers_subject: feature description of the robot part (e.g., right manipulator)
-        - modifiers_object: feature description of the object (e.g., red cup, clear bottle, none)
-
-    10. CRITICAL KINEMATIC ALIGNMENT: You MUST strictly align your motion-units with the 'gripper' values in 'frame_angles'. 
-        - A 'gripper' value near 1.0 means open; near 0.0 means closed.
-        - If you observe a sudden jump in the 'gripper' value (e.g., dropping from ~0.9 to ~0.4, or rising), this is a HARD BOUNDARY. 
-        - You MUST NOT merge a 'reach' or 'move' action with a 'grasp' or 'release'. 
-        - Isolate the exact frame where the gripper value changes into a short, dedicated motion-unit (e.g., "[{{52, 54}}, (right_gripper, grasp, orange, ...)]").
-
-    11. STATE TRACKER ANTI-LAZINESS RULE: Before outputting the line-by-line motion-units, you MUST act as a State Tracker and output a JSON block summarizing the World State Graph at the END of these {num_actual} frames (frame {num_actual-1}). 
-        - You must actively update the `macro_skill_id` and `object_physical_state`.
-        - The task involves multiple DIFFERENT objects (orange, paper ball, bottle, knife, etc.). 
-        - When the robot's end_effector targets a NEW object, you MUST change the `macro_skill_id` (e.g., from 'manipulate_fruit' to 'dispose_paper_ball'). Do not copy the previous state blindly.
-        - Follow this template strictly:
-        {wsm_template}
-
-    The kinematic posture information provided is as follows:
+    [GLOBAL TASK]: {task_description}
+    [CURRENT WORLD STATE]: {state_str}
+    
+    [KINEMATICS DATA]: 
     {kinematics_str}
+    (Note: 'gripper' near 1.0 means OPEN, near 0.0 means CLOSED. A sudden change means grasp or release).
 
-    Your English description is:
+    [STRICT RULES]:
+    1. DO NOT output any markdown text outside the JSON block.
+    2. DO NOT output any frame numbers or timestamps. The system will align the time physically.
+    3. You must ONLY output a JSON object exactly matching this structure:
+    ```json
+    {schema_template}
+    ```
+    4. Allowed Action Verbs: {allowed_verbs}
+    5. Allowed Predicates: {allowed_predicates}
+    6. Logical Strictness: 
+       - If you output 'grasp', the precondition MUST include 'hand_free', and effect MUST include 'holding'.
+       - Physical sensors (Kinematics) have the highest authority. If the gripper value doesn't change to closed, DO NOT output 'grasp'.
+    7. Retract vs. Idle Strategy (End of Task):
+       - Look at the overall 'vel' (velocity) and 'angle' in the kinematics data.
+       - If the arm is moving out of the camera view or away from the objects, AND the 'vel' is significantly greater than 0, you MUST output 'retract' (the robot is actively returning to home position).
+       - If the arm is out of view OR completely motionless, AND the 'vel' drops to near 0, you MUST output 'idle' and use 'at_rest' for the effect predicate. Do not invent task-related actions if the kinematics show no movement.
     """
     return prompt
 
-def update_world_state(current_state: dict, latest_vlm_output: str) -> dict:
+def update_world_state(current_state: dict, pddl_trajectory) -> dict:
     """
-    不再拼接字符串历史，而是提取 VLM 生成的 JSON 状态机，进行增量更新。
-    返回更新后的字典。
+    新版状态更新：直接读取 Pydantic 对象中的 Effects 进行全局状态覆盖
     """
-    updated_state = copy.deepcopy(current_state) # 避免意外修改原字典
+    updated_state = copy.deepcopy(current_state)
     
-    # 使用正则捕获 markdown 格式的 json 块
-    json_match = re.search(r'```json\s*(.*?)\s*```', latest_vlm_output, re.DOTALL | re.IGNORECASE)
-    
-    if json_match:
-        try:
-            new_state_str = json_match.group(1)
-            new_state_dict = json.loads(new_state_str)
-            
-            # 使用 VLM 推理出的新状态覆盖旧状态
-            updated_state.update(new_state_dict)
-            print(f"   🧠 [状态更新] 当前宏观技能迁移至: {updated_state.get('temporal_context', {}).get('macro_skill_id', 'unknown')}")
-            
-        except json.JSONDecodeError as e:
-            print(f"   ⚠️ [警告] VLM 输出了 JSON 但格式错误，维持上一状态。错误: {e}")
-    else:
-        print("   ⚠️ [警告] 无法从 VLM 输出中提取 JSON 状态机，维持上一状态。")
+    if not pddl_trajectory or not pddl_trajectory.operators:
+        return updated_state
         
+    # 根据这一帧的所有动作 Effects 更新全局状态
+    for op in pddl_trajectory.operators:
+        for eff in op.effects:
+            # 这里可以做一个简单的映射，把 effect 写入到 object_physical_state
+            # 为了简化，我们直接把动作记录到 temporal_context 中
+            updated_state["temporal_context"]["last_action"] = op.action_verb
+            updated_state["temporal_context"]["last_target"] = op.target_object
+            
+            # 如果是 holding，更新末端执行器状态
+            if eff.predicate == "holding":
+                updated_state["robot_interaction_state"]["right_end_effector"]["grasp_type"] = "holding"
+                updated_state["robot_interaction_state"]["right_end_effector"]["contact_target"] = op.target_object
+            elif eff.predicate == "hand_free":
+                updated_state["robot_interaction_state"]["right_end_effector"]["grasp_type"] = "none"
+                updated_state["robot_interaction_state"]["right_end_effector"]["contact_target"] = "none"
+                
     return updated_state

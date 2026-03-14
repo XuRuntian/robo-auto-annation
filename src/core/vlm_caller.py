@@ -14,6 +14,8 @@ from typing import List, Optional, Union, Dict, Any
 from PIL import Image
 from openai import OpenAI
 import httpx
+from pydantic import ValidationError
+from src.core.semantics.schema import PDDLTrajectory
 
 # 配置日志记录
 logger = logging.getLogger(__name__)
@@ -240,3 +242,48 @@ class QwenVLCaller:
                 "total_tokens": self.total_prompt_tokens + self.total_completion_tokens,
                 "estimated_cost_rmb": round(cost, 4)
             }
+    def generate_with_validation(
+        self,
+        prompt: str,
+        images: Optional[List[Image.Image]] = None,
+        system_prompt: Optional[str] = "You are a helpful and precise robotic expert.",
+        max_retries: int = 3
+    ) -> Optional[PDDLTrajectory]:
+        """
+        带 Pydantic 严格校验和闭环纠错的 VLM 生成机制
+        """
+        current_prompt = prompt
+        
+        for attempt in range(max_retries):
+            try:
+                # 1. 调用底层的 generate 获取文本
+                if attempt > 0:
+                    logger.warning(f"🔄 [闭环纠错] 正在进行第 {attempt + 1}/{max_retries} 次重试...")
+                
+                response_text = self.generate(current_prompt, images, system_prompt)
+                
+                # 2. 提取 JSON
+                json_data = self.extract_json(response_text)
+                
+                # 3. 🛡️ 核心：Pydantic 强制反序列化与逻辑校验
+                # 如果 VLM 幻觉编造了不存在的动作、违反了物理规律，这里会直接抛出 ValidationError
+                validated_trajectory = PDDLTrajectory(**json_data)
+                
+                return validated_trajectory  # 校验通过，完美返回！
+                
+            except ValueError as e:
+                # 捕获 JSON 解析失败 或 Pydantic 的校验失败
+                error_msg = str(e)
+                logger.error(f"❌ 校验失败: {error_msg}")
+                
+                # 构造 Feedback，打回重做 (参考 UniDomain 论文的方法)
+                feedback_prompt = (
+                    f"\n\n[System Feedback from your previous output]:\n"
+                    f"Your output failed validation with the following error(s):\n{error_msg}\n"
+                    f"Please correct your reasoning and ensure your output strictly follows the JSON schema and physical logic."
+                )
+                current_prompt += feedback_prompt
+                
+        # API 熔断：超过重试次数
+        logger.error("🛑 [Fallback] VLM 陷入死循环或顽固幻觉，达到最大重试次数。跳过当前 Chunk。")
+        return None
