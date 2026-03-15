@@ -138,3 +138,37 @@ def update_world_state(current_state: dict, pddl_trajectory) -> dict:
                 updated_state["robot_interaction_state"]["right_end_effector"]["contact_target"] = "none"
                 
     return updated_state
+
+
+def build_vocab_generation_prompt(task_desc: str, interacting_objects: str, robot_info: str) -> str:
+    return f"""You are an expert in defining PDDL (Planning Domain Definition Language) ontology for embodied AI. 
+Your task is to generate a strictly structured vocabulary of 'verbs' and 'predicates' for a specific robot task.
+
+=========================================
+[LAYER 1: BASIC PRIOR KNOWLEDGE]
+- Global Task Description: {task_desc}
+- Interacting Objects: {interacting_objects}
+- Robot Hardware Setup: {robot_info}
+
+[Ontology Rules]:
+1. 'verbs' must be atomic, executable physical actions based ONLY on the hardware setup and the visual sequence.
+2. 'predicates' must be observable physical or topological states strictly related to the "Interacting Objects" or the robot's end-effector.
+3. Do not include complex macro-actions (e.g., "make_coffee") in 'verbs'.
+=========================================
+
+=========================================
+[LAYER 2: DYNAMIC VISUAL VALIDATION]
+Please review the attached image grid (containing 9 sequential frames uniformly sampled from the task trajectory).
+Use this visual sequence as your "ground truth" to validate your vocabulary.
+
+[Visual Self-Correction Directives]:
+1. If the robot's end-effector never physically closes or grasps an object in the images, DO NOT generate verbs like 'grasp' or 'release'. Consider verbs like 'push', 'poke', or 'move'.
+2. Only generate predicates for the objects you actually see interacting in the sequence.
+=========================================
+
+Output ONLY a valid JSON object matching this structure, with no markdown formatting or extra conversational text:
+{{
+  "verbs": ["verb1", "verb2"],
+  "predicates": ["pred1", "pred2"]
+}}
+"""

@@ -1,26 +1,22 @@
 verbs:
-  - approach   # 靠近目标
-  - reach      # 伸出
-  - grasp      # 抓取
-  - lift       # 抬起
-  - move       # 移动
-  - place      # 放置
-  - release    # 松开
-  - pour       # 倾倒
-  - retract    # 撤回手臂/复位
-  - insert     # 插入
-  - open
-  - close
-  - idle
-
+  - grasp
+  - release
+  - move_to
+  - place
+  - pick_up
+  - insert
+  - retract   # Prompt 规则 7 需要
+  - idle      # Prompt 规则 7 需要
 predicates:
-  - hand_free  # 手是空的
-  - holding    # 抓着东西
-  - is_open    # 夹爪张开
-  - is_closed  # 夹爪闭合
-  - on_table   # 在桌子上
-  - in_target  # 在目标容器内
-  - is_filled  # 容器被装满
-  - near       # 在目标附近 (解决 in_reach 的幻觉)
-  - contact    # 物理接触
-  - at_rest    # 处于静止/复位状态
+  - on_table
+  - in_container
+  - upright
+  - held_by_robot
+  - contains
+  - next_to
+  # --- 下面是必须保留的系统级物理状态 ---
+  - hand_free
+  - holding
+  - is_open
+  - is_closed
+  - at_rest

@@ -13,7 +13,7 @@ from src.core.kinematics.calculator import KinematicCalculator
 from src.core.physics.gap.segmentor import GAPSegmentor
 
 # 导入重构后的全新语义与调用模块
-from src.core.semantics.prompts import build_robotics_pamor_prompt, update_world_state, build_subtask_summary_prompt
+from src.core.semantics.prompts import *
 from src.core.vlm_caller import QwenVLCaller
 
 # 引入我们定义的强类型 Schema
@@ -49,7 +49,64 @@ class RoboAnnotationPipeline:
         
         # 3. 初始化带闭环纠错的大模型调用器 (不再需要 Parser)
         self.vlm = QwenVLCaller()
+    def auto_generate_vocab(self, data_path: str, task_desc: str, objects: str, robot_info: str):
+        print("\n🧠 [Vocabulary Generation] 正在提取 9 帧视觉序列...")
+        
+        # 1. 加载数据并均匀抽帧
+        reader = ReaderFactory.get_reader(data_path)
+        if not reader.load(data_path):
+            raise ValueError(f"无法加载数据集以生成词汇表: {data_path}")
+            
+        traj_len = reader.get_length()
+        if traj_len < 9:
+            raise ValueError(f"数据长度不足 9 帧 (当前 {traj_len} 帧)，无法生成有效序列")
+            
+        # 均匀抽取 9 帧
+        sample_indices = np.linspace(0, traj_len - 1, num=9, dtype=int)
+        
+        pil_images = []
+        for idx in sample_indices:
+            frame_data = reader.get_frame(int(idx))
+            if not frame_data or not frame_data.images:
+                continue
+            
+            # 优先拿一个全局视角或第一视角
+            cam_name = 'cam_front_head_rgb' if 'cam_front_head_rgb' in frame_data.images else list(frame_data.images.keys())[0]
+            img_array = frame_data.images[cam_name]
+            
+            # 标准化图像格式
+            if not isinstance(img_array, np.ndarray): img_array = np.array(img_array)
+            if img_array.ndim == 3 and img_array.shape[0] in [1, 3, 4]: img_array = np.transpose(img_array, (1, 2, 0))
+            if img_array.dtype in [np.float32, np.float64]: img_array = (img_array * 255).clip(0, 255).astype(np.uint8)
+            elif img_array.dtype != np.uint8: img_array = img_array.astype(np.uint8)
+            
+            pil_images.append(PILImage.fromarray(img_array))
+            
+        reader.close()
 
+        # 2. 拼接 Prompt 并调用 VLM
+        print("🧠 [Vocabulary Generation] 正在请求 VLM 动态推导动作空间...")
+        prompt = build_vocab_generation_prompt(task_desc, objects, robot_info)
+        
+        try:
+            response_text = self.vlm.generate(prompt=prompt, images=pil_images)
+            vocab_json = self.vlm.extract_json(response_text)
+            
+            if "verbs" not in vocab_json or "predicates" not in vocab_json:
+                raise ValueError("VLM 生成的 JSON 缺少 'verbs' 或 'predicates'")
+            
+            # 3. 覆盖写入 YAML
+            vocab_path = "configs/task_vocab.yaml"
+            os.makedirs(os.path.dirname(vocab_path), exist_ok=True)
+            with open(vocab_path, "w", encoding="utf-8") as f:
+                yaml.dump(vocab_json, f, allow_unicode=True, sort_keys=False)
+                
+            print(f"✅ 任务词汇表已生成并覆盖至 {vocab_path}")
+            return vocab_json
+            
+        except Exception as e:
+            print(f"❌ 词汇表生成失败: {e}")
+            raise e
     def _slice_arm_states(self, arm_states: dict[str, ArmState], start_idx: int, end_idx: int) -> dict[str, ArmState]:
         """辅助函数：将完整轨迹的 ArmState 切片为 Chunk 对应的局部片段"""
         sliced_states = {}
@@ -164,12 +221,13 @@ class RoboAnnotationPipeline:
             print(f"   🐛 [Debug] Chunk {idx} 的 {len(pil_images)} 张采样图已保存至: {debug_dir}")
             # 👆 ========================================== 👆
             # 构造强约束 PDDL Prompt
+            current_vocab = get_current_vocab()
             prompt = build_robotics_pamor_prompt(
                 kinematic_json=kinematic_json, 
                 task_description=task_description, 
                 world_state_dict=current_wsm,
-                allowed_verbs=VOCAB["verbs"],           # 新增传参
-                allowed_predicates=VOCAB["predicates"]  # 新增传参
+                allowed_verbs=current_vocab["verbs"],           # 新增传参
+                allowed_predicates=current_vocab["predicates"]  # 新增传参
             )
             
             try:

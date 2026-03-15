@@ -4,13 +4,13 @@ robot:
   # 手臂索引定义 [start, end]
   arms:
     right:
-      move: [20, 23]     # 对应 qpos 的索引
-      rotate: [23, 26]
-      gripper: 19
+      move: [8, 11]     # 对应 qpos 的索引
+      rotate: [11, 14]
+      gripper: 7
     left:
-      move: [7, 10]
-      rotate: [10, 13]
-      gripper: 6
+      move: [22, 25]
+      rotate: [25, 28]
+      gripper: 21
 
 # 运动学计算参数
 kinematics:
